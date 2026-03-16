@@ -22,6 +22,7 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 intents.moderation = True
+intents.voice_states = True  # Для отслеживания войс-каналов
 
 class ModerationBot(commands.Bot):
     def __init__(self):
@@ -135,7 +136,9 @@ class GuildSettings:
             "message_edit": {},  # Измененные сообщения
             "bulk_delete": {},  # Массовые удаления
             "role_give": {},  # Выдача ролей новичкам
-            "warns": {}  # Предупреждения
+            "warns": {},  # Предупреждения
+            "voice": {},  # Голосовые каналы (вход/выход)
+            "nickname": {}  # Смена никнеймов
         }
         self.mod_logs = {}  # guild_id: [logs]
         self.warns = {}  # guild_id: {user_id: [warns]}
@@ -236,6 +239,26 @@ async def log_warn(guild, action_description):
     embed.set_footer(text="by Ilya Vetrov • Предупреждения")
     await send_to_log_channel(guild, "warns", embed)
 
+async def log_voice(guild, action_description, color=discord.Color.purple()):
+    """Логирование голосовых каналов"""
+    embed = discord.Embed(
+        description=action_description,
+        color=color,
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.set_footer(text="by Ilya Vetrov • Голосовые каналы")
+    await send_to_log_channel(guild, "voice", embed)
+
+async def log_nickname(guild, action_description):
+    """Логирование смены никнеймов"""
+    embed = discord.Embed(
+        description=action_description,
+        color=discord.Color.teal(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.set_footer(text="by Ilya Vetrov • Смена ника")
+    await send_to_log_channel(guild, "nickname", embed)
+
 # ==================== СЛЕШ-КОМАНДЫ ДЛЯ НАСТРОЙКИ КАНАЛОВ ====================
 
 @bot.tree.command(name="set_mod_log_channel", description="Установить канал для логов действий модерации")
@@ -328,6 +351,36 @@ async def slash_set_warns_channel(interaction: discord.Interaction, channel: dis
     embed.set_footer(text="by Ilya Vetrov • Настройка логов")
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="set_voice_channel", description="Установить канал для логов голосовых каналов")
+@app_commands.describe(channel="Канал для логирования")
+@is_admin_only()
+async def slash_set_voice_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    settings.log_channels["voice"][str(interaction.guild_id)] = channel.id
+    settings.save_log_channels()
+    
+    embed = discord.Embed(
+        title="✅ Канал для голосовых каналов установлен",
+        description=f"Входы/выходы из войс-каналов будут логироваться в {channel.mention}",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="set_nickname_channel", description="Установить канал для логов смены никнеймов")
+@app_commands.describe(channel="Канал для логирования")
+@is_admin_only()
+async def slash_set_nickname_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    settings.log_channels["nickname"][str(interaction.guild_id)] = channel.id
+    settings.save_log_channels()
+    
+    embed = discord.Embed(
+        title="✅ Канал для смены никнеймов установлен",
+        description=f"Смена никнеймов будет логироваться в {channel.mention}",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="show_log_channels", description="Показать настроенные каналы для логов")
 @is_admin_only()
 async def slash_show_log_channels(interaction: discord.Interaction):
@@ -345,7 +398,9 @@ async def slash_show_log_channels(interaction: discord.Interaction):
         "message_edit": "✏️ Измененные сообщения",
         "bulk_delete": "📦 Массовые удаления",
         "role_give": "👥 Выдача ролей",
-        "warns": "⚠️ Предупреждения"
+        "warns": "⚠️ Предупреждения",
+        "voice": "🔊 Голосовые каналы",
+        "nickname": "📝 Смена никнеймов"
     }
     
     for key, name in channel_types.items():
@@ -378,7 +433,7 @@ async def slash_set_join_role(interaction: discord.Interaction, role: discord.Ro
     )
     embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
     await interaction.response.send_message(embed=embed)
-    await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} установил роль {role.mention} для новичков")
+    await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} (`{interaction.user.id}`) установил роль {role.mention} для новичков")
 
 @bot.tree.command(name="remove_join_role", description="Отключить автоматическую выдачу роли")
 @is_admin_only()
@@ -394,7 +449,7 @@ async def slash_remove_join_role(interaction: discord.Interaction):
         )
         embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
         await interaction.response.send_message(embed=embed)
-        await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} отключил автовыдачу роли")
+        await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} (`{interaction.user.id}`) отключил автовыдачу роли")
     else:
         await interaction.response.send_message("❌ Автовыдача роли не была настроена", ephemeral=True)
 
@@ -409,14 +464,14 @@ async def slash_kick(interaction: discord.Interaction, member: discord.Member, r
         
         embed = discord.Embed(
             title="👢 Пользователь кикнут",
-            description=f"**Пользователь:** {member.mention}\n**Причина:** {reason}",
+            description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Причина:** {reason}",
             color=discord.Color.orange(),
             timestamp=datetime.datetime.utcnow()
         )
-        embed.set_footer(text=f"Модератор: {interaction.user} • by Ilya Vetrov")
+        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
         await interaction.response.send_message(embed=embed)
         
-        await log_mod_action(interaction.guild, f"👢 {interaction.user.mention} кикнул {member.mention}\nПричина: {reason}")
+        await log_mod_action(interaction.guild, f"👢 {interaction.user.mention} (`{interaction.user.id}`) кикнул {member.mention} (`{member.id}`)\nПричина: {reason}")
         await save_mod_log(interaction.guild, "kick", interaction.user, member, reason)
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
@@ -430,14 +485,14 @@ async def slash_ban(interaction: discord.Interaction, member: discord.Member, re
         
         embed = discord.Embed(
             title="🔨 Пользователь забанен",
-            description=f"**Пользователь:** {member.mention}\n**Причина:** {reason}",
+            description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Причина:** {reason}",
             color=discord.Color.red(),
             timestamp=datetime.datetime.utcnow()
         )
-        embed.set_footer(text=f"Модератор: {interaction.user} • by Ilya Vetrov")
+        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
         await interaction.response.send_message(embed=embed)
         
-        await log_mod_action(interaction.guild, f"🔨 {interaction.user.mention} забанил {member.mention}\nПричина: {reason}")
+        await log_mod_action(interaction.guild, f"🔨 {interaction.user.mention} (`{interaction.user.id}`) забанил {member.mention} (`{member.id}`)\nПричина: {reason}")
         await save_mod_log(interaction.guild, "ban", interaction.user, member, reason)
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
@@ -452,14 +507,14 @@ async def slash_unban(interaction: discord.Interaction, user_id: str, reason: st
         
         embed = discord.Embed(
             title="🔓 Пользователь разбанен",
-            description=f"**Пользователь:** {user.name}\n**Причина:** {reason}",
+            description=f"**Пользователь:** {user.name}\n**ID:** `{user.id}`\n**Причина:** {reason}",
             color=discord.Color.green(),
             timestamp=datetime.datetime.utcnow()
         )
-        embed.set_footer(text=f"Модератор: {interaction.user} • by Ilya Vetrov")
+        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
         await interaction.response.send_message(embed=embed)
         
-        await log_mod_action(interaction.guild, f"🔓 {interaction.user.mention} разбанил {user.name}\nПричина: {reason}")
+        await log_mod_action(interaction.guild, f"🔓 {interaction.user.mention} (`{interaction.user.id}`) разбанил {user.name} (`{user.id}`)\nПричина: {reason}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
 
@@ -473,14 +528,14 @@ async def slash_mute(interaction: discord.Interaction, member: discord.Member, m
         
         embed = discord.Embed(
             title="🔇 Пользователь замучен",
-            description=f"**Пользователь:** {member.mention}\n**Длительность:** {minutes} мин\n**Причина:** {reason}",
+            description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Длительность:** {minutes} мин\n**Причина:** {reason}",
             color=discord.Color.dark_gray(),
             timestamp=datetime.datetime.utcnow()
         )
-        embed.set_footer(text=f"Модератор: {interaction.user} • by Ilya Vetrov")
+        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
         await interaction.response.send_message(embed=embed)
         
-        await log_mod_action(interaction.guild, f"🔇 {interaction.user.mention} замутил {member.mention} на {minutes} мин\nПричина: {reason}")
+        await log_mod_action(interaction.guild, f"🔇 {interaction.user.mention} (`{interaction.user.id}`) замутил {member.mention} (`{member.id}`) на {minutes} мин\nПричина: {reason}")
         await save_mod_log(interaction.guild, "mute", interaction.user, member, reason, minutes)
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
@@ -494,14 +549,14 @@ async def slash_unmute(interaction: discord.Interaction, member: discord.Member,
         
         embed = discord.Embed(
             title="🔊 Мут снят",
-            description=f"**Пользователь:** {member.mention}\n**Причина:** {reason}",
+            description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Причина:** {reason}",
             color=discord.Color.green(),
             timestamp=datetime.datetime.utcnow()
         )
-        embed.set_footer(text=f"Модератор: {interaction.user} • by Ilya Vetrov")
+        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
         await interaction.response.send_message(embed=embed)
         
-        await log_mod_action(interaction.guild, f"🔊 {interaction.user.mention} снял мут с {member.mention}\nПричина: {reason}")
+        await log_mod_action(interaction.guild, f"🔊 {interaction.user.mention} (`{interaction.user.id}`) снял мут с {member.mention} (`{member.id}`)\nПричина: {reason}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
 
@@ -521,7 +576,7 @@ async def slash_clear(interaction: discord.Interaction, amount: int):
         embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
         await interaction.followup.send(embed=embed, ephemeral=True)
         
-        await log_mod_action(interaction.guild, f"🧹 {interaction.user.mention} очистил {len(deleted)} сообщений в {interaction.channel.mention}")
+        await log_mod_action(interaction.guild, f"🧹 {interaction.user.mention} (`{interaction.user.id}`) очистил {len(deleted)} сообщений в {interaction.channel.mention}")
     except Exception as e:
         await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
 
@@ -548,11 +603,11 @@ async def slash_warn(interaction: discord.Interaction, member: discord.Member, r
     
     embed = discord.Embed(
         title="⚠️ Предупреждение",
-        description=f"**Пользователь:** {member.mention}\n**Предупреждений:** {len(settings.warns[guild_id][user_id])}\n**Причина:** {reason}",
+        description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Предупреждений:** {len(settings.warns[guild_id][user_id])}\n**Причина:** {reason}",
         color=discord.Color.yellow(),
         timestamp=datetime.datetime.utcnow()
     )
-    embed.set_footer(text=f"Модератор: {interaction.user} • by Ilya Vetrov")
+    embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
     await interaction.response.send_message(embed=embed)
     
     try:
@@ -560,7 +615,7 @@ async def slash_warn(interaction: discord.Interaction, member: discord.Member, r
     except:
         pass
     
-    await log_warn(interaction.guild, f"⚠️ {interaction.user.mention} выдал предупреждение {member.mention}\nПричина: {reason}")
+    await log_warn(interaction.guild, f"⚠️ {interaction.user.mention} (`{interaction.user.id}`) выдал предупреждение {member.mention} (`{member.id}`)\nПричина: {reason}")
 
 @bot.tree.command(name="warns", description="Показать предупреждения пользователя")
 @app_commands.describe(member="Пользователь")
@@ -573,6 +628,7 @@ async def slash_warns(interaction: discord.Interaction, member: discord.Member):
         
         embed = discord.Embed(
             title=f"Предупреждения: {member.display_name}",
+            description=f"**ID:** `{member.id}`",
             color=discord.Color.orange()
         )
         embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
@@ -583,7 +639,7 @@ async def slash_warns(interaction: discord.Interaction, member: discord.Member):
             date = datetime.datetime.fromisoformat(warn["date"]).strftime("%d.%m.%Y %H:%M")
             embed.add_field(
                 name=f"#{i} - {date}",
-                value=f"**Модератор:** {mod_name}\n**Причина:** {warn['reason']}",
+                value=f"**Модератор:** {mod_name} (`{warn['moderator']}`)\n**Причина:** {warn['reason']}",
                 inline=False
             )
         
@@ -611,7 +667,7 @@ async def slash_mod_logs(interaction: discord.Interaction, limit: int = 10):
             date = datetime.datetime.fromisoformat(log["date"]).strftime("%d.%m.%Y %H:%M")
             embed.add_field(
                 name=f"{log['action']} - {date}",
-                value=f"**Модератор:** <@{log['moderator']}>\n**Пользователь:** <@{log['target']}>\n**Причина:** {log['reason']}",
+                value=f"**Модератор:** <@{log['moderator']}> (`{log['moderator']}`)\n**Пользователь:** <@{log['target']}> (`{log['target']}`)\n**Причина:** {log['reason']}",
                 inline=False
             )
         
@@ -635,7 +691,7 @@ async def slash_help(interaction: discord.Interaction):
     
     embed.add_field(
         name="📋 Настройка каналов для логов",
-        value="`/set_mod_log_channel` - канал для действий модерации\n`/set_message_delete_channel` - удаленные сообщения\n`/set_message_edit_channel` - измененные сообщения\n`/set_bulk_delete_channel` - массовые удаления\n`/set_role_give_channel` - выдача ролей\n`/set_warns_channel` - предупреждения\n`/show_log_channels` - показать настройки",
+        value="`/set_mod_log_channel` - канал для действий модерации\n`/set_message_delete_channel` - удаленные сообщения\n`/set_message_edit_channel` - измененные сообщения\n`/set_bulk_delete_channel` - массовые удаления\n`/set_role_give_channel` - выдача ролей\n`/set_warns_channel` - предупреждения\n`/set_voice_channel` - голосовые каналы\n`/set_nickname_channel` - смена никнеймов\n`/show_log_channels` - показать настройки",
         inline=False
     )
     
@@ -698,7 +754,7 @@ async def on_member_join(member):
         if role:
             await member.add_roles(role)
             logger.info(f'Выдана роль {role.name} пользователю {member.name}')
-            await log_role_give(member.guild, f'✅ Пользователь {member.mention} получил роль {role.mention}')
+            await log_role_give(member.guild, f'✅ Пользователь {member.mention} (`{member.id}`) получил роль {role.mention}')
 
 @bot.event
 async def on_message_delete(message):
@@ -716,7 +772,7 @@ async def on_message_delete(message):
                 color=discord.Color.red(),
                 timestamp=datetime.datetime.utcnow()
             )
-            embed.add_field(name="Автор", value=message.author.mention, inline=True)
+            embed.add_field(name="Автор", value=f"{message.author.mention}\nID: `{message.author.id}`", inline=True)
             embed.add_field(name="Канал", value=message.channel.mention, inline=True)
             
             if message.content:
@@ -745,7 +801,7 @@ async def on_message_edit(before, after):
                 color=discord.Color.orange(),
                 timestamp=datetime.datetime.utcnow()
             )
-            embed.add_field(name="Автор", value=before.author.mention, inline=True)
+            embed.add_field(name="Автор", value=f"{before.author.mention}\nID: `{before.author.id}`", inline=True)
             embed.add_field(name="Канал", value=before.channel.mention, inline=True)
             embed.add_field(name="До", value=before.content[:500] or "[Пусто]", inline=False)
             embed.add_field(name="После", value=after.content[:500] or "[Пусто]", inline=False)
@@ -772,6 +828,48 @@ async def on_bulk_message_delete(messages):
             )
             embed.set_footer(text="by Ilya Vetrov • Массовые удаления")
             await channel.send(embed=embed)
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Логирование изменений в голосовых каналах"""
+    if member.bot or not member.guild:
+        return
+    
+    guild_id = str(member.guild.id)
+    if guild_id not in settings.log_channels.get("voice", {}):
+        return
+    
+    # Зашел в голосовой канал
+    if before.channel is None and after.channel is not None:
+        description = f"🔊 {member.mention} (`{member.id}`) **зашел** в голосовой канал {after.channel.mention}"
+        await log_voice(member.guild, description, discord.Color.green())
+    
+    # Вышел из голосового канала
+    elif before.channel is not None and after.channel is None:
+        description = f"🔇 {member.mention} (`{member.id}`) **вышел** из голосового канала {before.channel.mention}"
+        await log_voice(member.guild, description, discord.Color.red())
+    
+    # Переместился между каналами
+    elif before.channel != after.channel:
+        description = f"🔄 {member.mention} (`{member.id}`) **переместился** из {before.channel.mention} в {after.channel.mention}"
+        await log_voice(member.guild, description, discord.Color.blue())
+
+@bot.event
+async def on_member_update(before, after):
+    """Логирование изменений профиля пользователя"""
+    if before.bot or not before.guild:
+        return
+    
+    guild_id = str(before.guild.id)
+    
+    # Логирование смены никнейма
+    if guild_id in settings.log_channels.get("nickname", {}):
+        if before.nick != after.nick:
+            old_nick = before.nick or before.name
+            new_nick = after.nick or after.name
+            
+            description = f"📝 {before.mention} (`{before.id}`) **сменил никнейм**\n**Было:** `{old_nick}`\n**Стало:** `{new_nick}`"
+            await log_nickname(before.guild, description)
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
