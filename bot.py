@@ -16,13 +16,18 @@ logger = logging.getLogger(__name__)
 # ID главного администратора (зафиксирован)
 MAIN_ADMIN_ID = 927642459998138418
 
+# ID вашего сервера и каналов
+YOUR_GUILD_ID = 886219875452854292  # ID сервера
+WELCOME_CHANNEL_ID = 886221288421589004  # Канал для приветствий
+BALANCE_CHANNEL_ID = 1444397866499182665  # Канал с балловой системой
+
 # Настройки бота
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
 intents.moderation = True
-intents.voice_states = True  # Для отслеживания войс-каналов
+intents.voice_states = True
 
 class ModerationBot(commands.Bot):
     def __init__(self):
@@ -35,7 +40,7 @@ class ModerationBot(commands.Bot):
         logger.info("✅ Слеш-команды синхронизированы")
         
     async def on_ready(self):
-        # Информационная панель при запуске (by Ilya Vetrov)
+        # Информационная панель при запуске
         print("\n" + "="*50)
         print("🤖 МОДЕРАЦИОННЫЙ БОТ ЗАПУЩЕН")
         print("="*50)
@@ -75,20 +80,16 @@ class DataManager:
         self.ensure_data_folder()
         
     def ensure_data_folder(self):
-        """Создает папку для данных, если её нет"""
         if not os.path.exists(self.data_folder):
             os.makedirs(self.data_folder)
             logger.info(f"📁 Создана папка {self.data_folder}")
     
     def save_data(self, filename, local_filename, data):
-        """Сохранение данных в JSON"""
         try:
-            # Сохраняем в защищенную папку
             filepath = os.path.join(self.data_folder, filename)
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
             
-            # Дублируем в корень
             with open(local_filename, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
                 
@@ -99,8 +100,6 @@ class DataManager:
             return False
     
     def load_data(self, filename, local_filename, default=None):
-        """Загрузка данных из JSON"""
-        # Сначала пробуем загрузить из защищенной папки
         filepath = os.path.join(self.data_folder, filename)
         if os.path.exists(filepath):
             try:
@@ -109,12 +108,10 @@ class DataManager:
             except Exception as e:
                 logger.error(f"❌ Ошибка загрузки {filename}: {e}")
         
-        # Если нет, пробуем загрузить из корня
         if os.path.exists(local_filename):
             try:
                 with open(local_filename, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                # Сразу сохраняем в защищенную папку
                 self.save_data(filename, local_filename, data)
                 return data
             except Exception as e:
@@ -128,26 +125,23 @@ data_manager = DataManager()
 
 class GuildSettings:
     def __init__(self):
-        self.join_roles = {}  # guild_id: role_id
-        # Разные каналы для разных типов логов
+        self.join_roles = {}
         self.log_channels = {
-            "mod_actions": {},  # Действия модерации (kick/ban/mute и т.д.)
-            "message_delete": {},  # Удаленные сообщения
-            "message_edit": {},  # Измененные сообщения
-            "bulk_delete": {},  # Массовые удаления
-            "role_give": {},  # Выдача ролей новичкам
-            "warns": {},  # Предупреждения
-            "voice": {},  # Голосовые каналы (вход/выход)
-            "nickname": {}  # Смена никнеймов
+            "mod_actions": {},
+            "message_delete": {},
+            "message_edit": {},
+            "bulk_delete": {},
+            "role_give": {},
+            "warns": {},
+            "voice": {},
+            "nickname": {}
         }
-        self.mod_logs = {}  # guild_id: [logs]
-        self.warns = {}  # guild_id: {user_id: [warns]}
+        self.mod_logs = {}
+        self.warns = {}
         
     def load_all(self):
-        """Загружает все настройки"""
         self.join_roles = data_manager.load_data('join_roles.json', LOCAL_JOIN_ROLES, {})
         
-        # Загружаем настройки каналов
         loaded_channels = data_manager.load_data('log_channels.json', LOCAL_LOG_CHANNELS, {})
         for key in self.log_channels.keys():
             if key in loaded_channels:
@@ -156,12 +150,11 @@ class GuildSettings:
         self.mod_logs = data_manager.load_data('mod_logs.json', LOCAL_MOD_LOGS, {})
         self.warns = data_manager.load_data('warns.json', LOCAL_WARNS, {})
         
-        # Конвертируем ключи
         self.join_roles = {int(k) if isinstance(k, str) and k.isdigit() else k: v for k, v in self.join_roles.items()}
         self.mod_logs = {int(k) if isinstance(k, str) and k.isdigit() else k: v for k, v in self.mod_logs.items()}
         self.warns = {int(k) if isinstance(k, str) and k.isdigit() else k: v for k, v in self.warns.items()}
         
-        logger.info(f"📂 Загружено: join_roles: {len(self.join_roles)}, mod_channels: {sum(len(v) for v in self.log_channels.values())}")
+        logger.info(f"📂 Загружено: join_roles: {len(self.join_roles)}")
         
     def save_join_roles(self):
         data_manager.save_data('join_roles.json', LOCAL_JOIN_ROLES, self.join_roles)
@@ -180,22 +173,17 @@ settings = GuildSettings()
 # ==================== ПРОВЕРКА ПРАВ ====================
 
 def is_admin_only():
-    """Проверка, является ли пользователь администратором (строгая проверка)"""
     async def predicate(interaction: discord.Interaction):
-        # Главный администратор имеет абсолютные права
         if interaction.user.id == MAIN_ADMIN_ID:
             return True
-        # Проверка на наличие прав администратора
         if interaction.user.guild_permissions.administrator:
             return True
-        # Если нет прав - вызываем ошибку
         raise app_commands.errors.MissingPermissions(["administrator"])
     return app_commands.check(predicate)
 
 # ==================== ФУНКЦИИ ДЛЯ ОТПРАВКИ В РАЗНЫЕ КАНАЛЫ ====================
 
 async def send_to_log_channel(guild, log_type, embed):
-    """Отправляет лог в соответствующий канал"""
     if not guild:
         return
     
@@ -210,7 +198,6 @@ async def send_to_log_channel(guild, log_type, embed):
                 logger.error(f"Ошибка отправки в канал {log_type}: {e}")
 
 async def log_mod_action(guild, action_description, color=discord.Color.blue()):
-    """Логирование действий модерации"""
     embed = discord.Embed(
         description=action_description,
         color=color,
@@ -220,7 +207,6 @@ async def log_mod_action(guild, action_description, color=discord.Color.blue()):
     await send_to_log_channel(guild, "mod_actions", embed)
 
 async def log_role_give(guild, action_description):
-    """Логирование выдачи ролей"""
     embed = discord.Embed(
         description=action_description,
         color=discord.Color.green(),
@@ -230,7 +216,6 @@ async def log_role_give(guild, action_description):
     await send_to_log_channel(guild, "role_give", embed)
 
 async def log_warn(guild, action_description):
-    """Логирование предупреждений"""
     embed = discord.Embed(
         description=action_description,
         color=discord.Color.yellow(),
@@ -240,7 +225,6 @@ async def log_warn(guild, action_description):
     await send_to_log_channel(guild, "warns", embed)
 
 async def log_voice(guild, action_description, color=discord.Color.purple()):
-    """Логирование голосовых каналов"""
     embed = discord.Embed(
         description=action_description,
         color=color,
@@ -250,7 +234,6 @@ async def log_voice(guild, action_description, color=discord.Color.purple()):
     await send_to_log_channel(guild, "voice", embed)
 
 async def log_nickname(guild, action_description):
-    """Логирование смены никнеймов"""
     embed = discord.Embed(
         description=action_description,
         color=discord.Color.teal(),
@@ -258,6 +241,50 @@ async def log_nickname(guild, action_description):
     )
     embed.set_footer(text="by Ilya Vetrov • Смена ника")
     await send_to_log_channel(guild, "nickname", embed)
+
+# ==================== КОМАНДА ДЛЯ ТЕСТА ПРИВЕТСТВИЯ ====================
+
+@bot.tree.command(name="test_welcome", description="Протестировать приветственное сообщение (для админов)")
+@is_admin_only()
+async def slash_test_welcome(interaction: discord.Interaction):
+    """Тестовая команда для проверки приветствия"""
+    await interaction.response.defer(ephemeral=True)
+    
+    # Отправляем в канал
+    channel = bot.get_channel(WELCOME_CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(
+            title="👋 ДОБРО ПОЖАЛОВАТЬ!",
+            description="Заполняем по форме:\n\n"
+                        "**Nick ставим - Фракция | NickName**\n"
+                        "1. Фракция | NickName\n"
+                        "2. Почта @gmail\n"
+                        "3. Ссылка на Форумник\n\n"
+                        f"📊 Ознакомиться с балловой системой можно здесь: <#{BALANCE_CHANNEL_ID}>",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="by Ilya Vetrov")
+        await channel.send(embed=embed)
+        
+        # Отправляем в ЛС тестеру
+        try:
+            dm_embed = discord.Embed(
+                title="👋 ДОБРО ПОЖАЛОВАТЬ НА СЕРВЕР!",
+                description="Заполняем по форме:\n\n"
+                            "**Nick ставим - Фракция | NickName**\n"
+                            "1. Фракция | NickName\n"
+                            "2. Почта @gmail\n"
+                            "3. Ссылка на Форумник\n\n"
+                            f"📊 Ознакомиться с балловой системой можно здесь: <#{BALANCE_CHANNEL_ID}>",
+                color=discord.Color.green()
+            )
+            dm_embed.set_footer(text="by Ilya Vetrov")
+            await interaction.user.send(embed=dm_embed)
+            await interaction.followup.send("✅ Тестовое приветствие отправлено в канал и вам в ЛС!", ephemeral=True)
+        except:
+            await interaction.followup.send("✅ Тестовое приветствие отправлено в канал (не удалось отправить ЛС)", ephemeral=True)
+    else:
+        await interaction.followup.send("❌ Канал для приветствий не найден!", ephemeral=True)
 
 # ==================== СЛЕШ-КОМАНДЫ ДЛЯ НАСТРОЙКИ КАНАЛОВ ====================
 
@@ -701,6 +728,12 @@ async def slash_help(interaction: discord.Interaction):
         inline=False
     )
     
+    embed.add_field(
+        name="🧪 Тестирование",
+        value="`/test_welcome` - протестировать приветственное сообщение",
+        inline=False
+    )
+    
     embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
     await interaction.response.send_message(embed=embed)
 
@@ -717,7 +750,6 @@ async def sync_command(ctx):
 
 @bot.command(name='статус')
 async def status_command(ctx):
-    """Показать статус бота"""
     if ctx.author.id != MAIN_ADMIN_ID and not ctx.author.guild_permissions.administrator:
         await ctx.send("❌ Только администраторы!")
         return
@@ -732,7 +764,6 @@ async def status_command(ctx):
     embed.add_field(name="🆔 ID", value=f"```{bot.user.id}```", inline=True)
     embed.add_field(name="🌐 Серверов", value=f"```{len(bot.guilds)}```", inline=True)
     
-    # Статистика настроек
     embed.add_field(name="⚙️ Автовыдача ролей", value=f"```{len(settings.join_roles)} серверов```", inline=True)
     
     total_channels = sum(len(v) for v in settings.log_channels.values())
@@ -746,7 +777,43 @@ async def status_command(ctx):
 
 @bot.event
 async def on_member_join(member):
-    """Выдача роли при заходе нового участника"""
+    """Выдача роли и приветствие при заходе нового участника"""
+    
+    # Приветствие для конкретного сервера
+    if member.guild.id == YOUR_GUILD_ID:
+        channel = bot.get_channel(WELCOME_CHANNEL_ID)
+        if channel:
+            embed = discord.Embed(
+                title="👋 ДОБРО ПОЖАЛОВАТЬ!",
+                description="Заполняем по форме:\n\n"
+                            "**Nick ставим - Фракция | NickName**\n"
+                            "1. Фракция | NickName\n"
+                            "2. Почта @gmail\n"
+                            "3. Ссылка на Форумник\n\n"
+                            f"📊 Ознакомиться с балловой системой можно здесь: <#{BALANCE_CHANNEL_ID}>",
+                color=discord.Color.green()
+            )
+            embed.set_footer(text="by Ilya Vetrov")
+            await channel.send(f"{member.mention}", embed=embed)
+            
+            # Отправка в личные сообщения
+            try:
+                dm_embed = discord.Embed(
+                    title="👋 ДОБРО ПОЖАЛОВАТЬ НА СЕРВЕР!",
+                    description="Заполняем по форме:\n\n"
+                                "**Nick ставим - Фракция | NickName**\n"
+                                "1. Фракция | NickName\n"
+                                "2. Почта @gmail\n"
+                                "3. Ссылка на Форумник\n\n"
+                                f"📊 Ознакомиться с балловой системой можно здесь: <#{BALANCE_CHANNEL_ID}>",
+                    color=discord.Color.green()
+                )
+                dm_embed.set_footer(text="by Ilya Vetrov")
+                await member.send(embed=dm_embed)
+            except:
+                pass  # Игнорируем, если нельзя отправить ЛС
+    
+    # Выдача роли (для всех серверов, где настроено)
     guild_id = str(member.guild.id)
     if guild_id in settings.join_roles:
         role_id = settings.join_roles[guild_id]
@@ -758,7 +825,6 @@ async def on_member_join(member):
 
 @bot.event
 async def on_message_delete(message):
-    """Логирование удаленных сообщений"""
     if message.author.bot or not message.guild:
         return
     
@@ -787,7 +853,6 @@ async def on_message_delete(message):
 
 @bot.event
 async def on_message_edit(before, after):
-    """Логирование измененных сообщений"""
     if before.author.bot or before.content == after.content or not before.guild:
         return
     
@@ -811,7 +876,6 @@ async def on_message_edit(before, after):
 
 @bot.event
 async def on_bulk_message_delete(messages):
-    """Логирование массового удаления сообщений"""
     if not messages:
         return
         
@@ -831,7 +895,6 @@ async def on_bulk_message_delete(messages):
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Логирование изменений в голосовых каналах"""
     if member.bot or not member.guild:
         return
     
@@ -839,30 +902,25 @@ async def on_voice_state_update(member, before, after):
     if guild_id not in settings.log_channels.get("voice", {}):
         return
     
-    # Зашел в голосовой канал
     if before.channel is None and after.channel is not None:
         description = f"🔊 {member.mention} (`{member.id}`) **зашел** в голосовой канал {after.channel.mention}"
         await log_voice(member.guild, description, discord.Color.green())
     
-    # Вышел из голосового канала
     elif before.channel is not None and after.channel is None:
         description = f"🔇 {member.mention} (`{member.id}`) **вышел** из голосового канала {before.channel.mention}"
         await log_voice(member.guild, description, discord.Color.red())
     
-    # Переместился между каналами
     elif before.channel != after.channel:
         description = f"🔄 {member.mention} (`{member.id}`) **переместился** из {before.channel.mention} в {after.channel.mention}"
         await log_voice(member.guild, description, discord.Color.blue())
 
 @bot.event
 async def on_member_update(before, after):
-    """Логирование изменений профиля пользователя"""
     if before.bot or not before.guild:
         return
     
     guild_id = str(before.guild.id)
     
-    # Логирование смены никнейма
     if guild_id in settings.log_channels.get("nickname", {}):
         if before.nick != after.nick:
             old_nick = before.nick or before.name
@@ -874,7 +932,6 @@ async def on_member_update(before, after):
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 async def save_mod_log(guild, action, moderator, target, reason, duration=None):
-    """Сохранение действий модерации"""
     guild_id = str(guild.id)
     
     if guild_id not in settings.mod_logs:
@@ -893,7 +950,6 @@ async def save_mod_log(guild, action, moderator, target, reason, duration=None):
     
     settings.mod_logs[guild_id].append(log_entry)
     
-    # Ограничиваем количество логов до 1000 на сервер
     if len(settings.mod_logs[guild_id]) > 1000:
         settings.mod_logs[guild_id] = settings.mod_logs[guild_id][-1000:]
     
@@ -932,11 +988,9 @@ async def on_app_command_error(interaction: discord.Interaction, error):
 # ==================== ЗАПУСК БОТА ====================
 
 if __name__ == "__main__":
-    # Загружаем настройки
     print("🔄 Загрузка данных...")
     settings.load_all()
     
-    # Получаем токен из переменной окружения
     token = os.getenv('TOKEN')
     
     if not token:
