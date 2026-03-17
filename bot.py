@@ -19,6 +19,7 @@ MAIN_ADMIN_ID = 927642459998138418
 # ID вашего сервера и каналов
 YOUR_GUILD_ID = 886219875452854292  # ID сервера
 WELCOME_CHANNEL_ID = 886221288421589004  # Канал для приветствий
+CURATOR_CHANNEL_ID = 1178309021065809951  # Канал с кураторами
 BALANCE_CHANNEL_ID = 1444397866499182665  # Канал с балловой системой
 
 # Настройки бота
@@ -250,32 +251,36 @@ async def slash_test_welcome(interaction: discord.Interaction):
     """Тестовая команда для проверки приветствия"""
     await interaction.response.defer(ephemeral=True)
     
+    welcome_text = (
+        "Поздравляю, Ты успешно прошел обзвон. на пост лидера своей фракции.\n"
+        "Ниже приведена инструкция:\n\n"
+        "Заполняем по форме:\n"
+        "**Nick ставим - Фракция | NickName**\n"
+        "**Фракция | NickName**\n"
+        "**Почта @gmail**\n"
+        "**Ссылка на Форумник**\n\n"
+        "1. На форуме обязательно поставь никнейм. Как в игре.\n"
+        "2. Обязательно включи двухфакторную аутентификацию. в дискорде и игре.\n"
+        f"3. По вопросам обращайтесь к своим кураторам. Узнать, кто ваш куратор, можно, посмотрев этот канал. <#{CURATOR_CHANNEL_ID}>.\n"
+        f"4. С балловой системе можно ознакомиться в этом канале <#{BALANCE_CHANNEL_ID}>"
+    )
+    
     # Отправляем в канал
     channel = bot.get_channel(WELCOME_CHANNEL_ID)
     if channel:
         embed = discord.Embed(
             title="👋 ДОБРО ПОЖАЛОВАТЬ!",
-            description="Заполняем по форме:\n\n"
-                        "**Nick ставим - Фракция | NickName**\n"
-                        "1. Фракция | NickName\n"
-                        "2. Почта @gmail\n"
-                        "3. Ссылка на Форумник\n\n"
-                        f"📊 Ознакомиться с балловой системой можно здесь: <#{BALANCE_CHANNEL_ID}>",
+            description=welcome_text,
             color=discord.Color.green()
         )
         embed.set_footer(text="by Ilya Vetrov")
-        await channel.send(embed=embed)
+        await channel.send(f"{interaction.user.mention}", embed=embed)
         
         # Отправляем в ЛС тестеру
         try:
             dm_embed = discord.Embed(
                 title="👋 ДОБРО ПОЖАЛОВАТЬ НА СЕРВЕР!",
-                description="Заполняем по форме:\n\n"
-                            "**Nick ставим - Фракция | NickName**\n"
-                            "1. Фракция | NickName\n"
-                            "2. Почта @gmail\n"
-                            "3. Ссылка на Форумник\n\n"
-                            f"📊 Ознакомиться с балловой системой можно здесь: <#{BALANCE_CHANNEL_ID}>",
+                description=welcome_text,
                 color=discord.Color.green()
             )
             dm_embed.set_footer(text="by Ilya Vetrov")
@@ -777,51 +782,48 @@ async def status_command(ctx):
 
 @bot.event
 async def on_member_join(member):
-    """Выдача роли и приветствие при заходе нового участника"""
+    """Приветствие при заходе нового участника (без выдачи роли)"""
     
-    # Приветствие для конкретного сервера
+    # Приветствие только для вашего конкретного сервера
     if member.guild.id == YOUR_GUILD_ID:
         channel = bot.get_channel(WELCOME_CHANNEL_ID)
         if channel:
+            welcome_text = (
+                "Поздравляю, Ты успешно прошел обзвон. на пост лидера своей фракции.\n"
+                "Ниже приведена инструкция:\n\n"
+                "Заполняем по форме:\n"
+                "**Nick ставим - Фракция | NickName**\n"
+                "**Фракция | NickName**\n"
+                "**Почта @gmail**\n"
+                "**Ссылка на Форумник**\n\n"
+                "1. На форуме обязательно поставь никнейм. Как в игре.\n"
+                "2. Обязательно включи двухфакторную аутентификацию. в дискорде и игре.\n"
+                f"3. По вопросам обращайтесь к своим кураторам. Узнать, кто ваш куратор, можно, посмотрев этот канал. <#{CURATOR_CHANNEL_ID}>.\n"
+                f"4. С балловой системе можно ознакомиться в этом канале <#{BALANCE_CHANNEL_ID}>"
+            )
+            
             embed = discord.Embed(
                 title="👋 ДОБРО ПОЖАЛОВАТЬ!",
-                description="Заполняем по форме:\n\n"
-                            "**Nick ставим - Фракция | NickName**\n"
-                            "1. Фракция | NickName\n"
-                            "2. Почта @gmail\n"
-                            "3. Ссылка на Форумник\n\n"
-                            f"📊 Ознакомиться с балловой системой можно здесь: <#{BALANCE_CHANNEL_ID}>",
+                description=welcome_text,
                 color=discord.Color.green()
             )
             embed.set_footer(text="by Ilya Vetrov")
             await channel.send(f"{member.mention}", embed=embed)
             
-            # Отправка в личные сообщения
+            # Отправляем ТО ЖЕ САМОЕ сообщение в личные сообщения
             try:
                 dm_embed = discord.Embed(
                     title="👋 ДОБРО ПОЖАЛОВАТЬ НА СЕРВЕР!",
-                    description="Заполняем по форме:\n\n"
-                                "**Nick ставим - Фракция | NickName**\n"
-                                "1. Фракция | NickName\n"
-                                "2. Почта @gmail\n"
-                                "3. Ссылка на Форумник\n\n"
-                                f"📊 Ознакомиться с балловой системой можно здесь: <#{BALANCE_CHANNEL_ID}>",
+                    description=welcome_text,
                     color=discord.Color.green()
                 )
                 dm_embed.set_footer(text="by Ilya Vetrov")
                 await member.send(embed=dm_embed)
-            except:
-                pass  # Игнорируем, если нельзя отправить ЛС
-    
-    # Выдача роли (для всех серверов, где настроено)
-    guild_id = str(member.guild.id)
-    if guild_id in settings.join_roles:
-        role_id = settings.join_roles[guild_id]
-        role = member.guild.get_role(int(role_id))
-        if role:
-            await member.add_roles(role)
-            logger.info(f'Выдана роль {role.name} пользователю {member.name}')
-            await log_role_give(member.guild, f'✅ Пользователь {member.mention} (`{member.id}`) получил роль {role.mention}')
+                logger.info(f"📨 Отправлено ЛС пользователю {member.name} ({member.id})")
+            except discord.Forbidden:
+                logger.warning(f"❌ Не удалось отправить ЛС пользователю {member.name} - закрыты личные сообщения")
+            except Exception as e:
+                logger.error(f"❌ Ошибка при отправке ЛС: {e}")
 
 @bot.event
 async def on_message_delete(message):
