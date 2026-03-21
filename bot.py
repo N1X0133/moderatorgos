@@ -207,13 +207,14 @@ async def log_mod_action(guild, action_description, color=discord.Color.blue()):
     embed.set_footer(text="by Ilya Vetrov • Модерация")
     await send_to_log_channel(guild, "mod_actions", embed)
 
-async def log_role_give(guild, action_description):
+async def log_role_give(guild, action_description, color=discord.Color.green()):
+    """Логирование выдачи/снятия ролей"""
     embed = discord.Embed(
         description=action_description,
-        color=discord.Color.green(),
+        color=color,
         timestamp=datetime.datetime.utcnow()
     )
-    embed.set_footer(text="by Ilya Vetrov • Выдача ролей")
+    embed.set_footer(text="by Ilya Vetrov • Изменение ролей")
     await send_to_log_channel(guild, "role_give", embed)
 
 async def log_warn(guild, action_description):
@@ -353,7 +354,7 @@ async def slash_set_bulk_delete_channel(interaction: discord.Interaction, channe
     embed.set_footer(text="by Ilya Vetrov • Настройка логов")
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="set_role_give_channel", description="Установить канал для логов выдачи ролей")
+@bot.tree.command(name="set_role_give_channel", description="Установить канал для логов выдачи/снятия ролей")
 @app_commands.describe(channel="Канал для логирования")
 @is_admin_only()
 async def slash_set_role_give_channel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -361,8 +362,8 @@ async def slash_set_role_give_channel(interaction: discord.Interaction, channel:
     settings.save_log_channels()
     
     embed = discord.Embed(
-        title="✅ Канал для выдачи ролей установлен",
-        description=f"Выдача ролей будет логироваться в {channel.mention}",
+        title="✅ Канал для изменений ролей установлен",
+        description=f"Выдача и снятие ролей будут логироваться в {channel.mention}",
         color=discord.Color.green()
     )
     embed.set_footer(text="by Ilya Vetrov • Настройка логов")
@@ -429,7 +430,7 @@ async def slash_show_log_channels(interaction: discord.Interaction):
         "message_delete": "🗑️ Удаленные сообщения",
         "message_edit": "✏️ Измененные сообщения",
         "bulk_delete": "📦 Массовые удаления",
-        "role_give": "👥 Выдача ролей",
+        "role_give": "👥 Изменение ролей",
         "warns": "⚠️ Предупреждения",
         "voice": "🔊 Голосовые каналы",
         "nickname": "📝 Смена никнеймов"
@@ -465,7 +466,7 @@ async def slash_set_join_role(interaction: discord.Interaction, role: discord.Ro
     )
     embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
     await interaction.response.send_message(embed=embed)
-    await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} (`{interaction.user.id}`) установил роль {role.mention} для новичков")
+    await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} (`{interaction.user.id}`) установил автоматическую выдачу роли {role.mention} для новичков", discord.Color.blue())
 
 @bot.tree.command(name="remove_join_role", description="Отключить автоматическую выдачу роли")
 @is_admin_only()
@@ -481,7 +482,7 @@ async def slash_remove_join_role(interaction: discord.Interaction):
         )
         embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
         await interaction.response.send_message(embed=embed)
-        await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} (`{interaction.user.id}`) отключил автовыдачу роли")
+        await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} (`{interaction.user.id}`) отключил автовыдачу роли", discord.Color.blue())
     else:
         await interaction.response.send_message("❌ Автовыдача роли не была настроена", ephemeral=True)
 
@@ -723,7 +724,7 @@ async def slash_help(interaction: discord.Interaction):
     
     embed.add_field(
         name="📋 Настройка каналов для логов",
-        value="`/set_mod_log_channel` - канал для действий модерации\n`/set_message_delete_channel` - удаленные сообщения\n`/set_message_edit_channel` - измененные сообщения\n`/set_bulk_delete_channel` - массовые удаления\n`/set_role_give_channel` - выдача ролей\n`/set_warns_channel` - предупреждения\n`/set_voice_channel` - голосовые каналы\n`/set_nickname_channel` - смена никнеймов\n`/show_log_channels` - показать настройки",
+        value="`/set_mod_log_channel` - канал для действий модерации\n`/set_message_delete_channel` - удаленные сообщения\n`/set_message_edit_channel` - измененные сообщения\n`/set_bulk_delete_channel` - массовые удаления\n`/set_role_give_channel` - выдача/снятие ролей\n`/set_warns_channel` - предупреждения\n`/set_voice_channel` - голосовые каналы\n`/set_nickname_channel` - смена никнеймов\n`/show_log_channels` - показать настройки",
         inline=False
     )
     
@@ -827,6 +828,7 @@ async def on_member_join(member):
 
 @bot.event
 async def on_message_delete(message):
+    """Логирование удаленных сообщений - КАЖДОЕ СООБЩЕНИЕ ОТДЕЛЬНО"""
     if message.author.bot or not message.guild:
         return
     
@@ -836,25 +838,55 @@ async def on_message_delete(message):
         channel = message.guild.get_channel(int(channel_id))
         if channel:
             embed = discord.Embed(
-                title="🗑 Сообщение удалено",
+                title="🗑 СООБЩЕНИЕ УДАЛЕНО",
                 color=discord.Color.red(),
                 timestamp=datetime.datetime.utcnow()
             )
-            embed.add_field(name="Автор", value=f"{message.author.mention}\nID: `{message.author.id}`", inline=True)
-            embed.add_field(name="Канал", value=message.channel.mention, inline=True)
             
+            # Информация об авторе
+            author_text = f"{message.author.mention}\nID: `{message.author.id}`\nИмя: `{message.author.name}`"
+            embed.add_field(name="👤 Автор", value=author_text, inline=True)
+            
+            # Информация о канале
+            channel_text = f"{message.channel.mention}\nID: `{message.channel.id}`"
+            embed.add_field(name="📌 Канал", value=channel_text, inline=True)
+            
+            # Время отправки
+            if message.created_at:
+                time_text = message.created_at.strftime("%d.%m.%Y %H:%M:%S")
+                embed.add_field(name="⏰ Отправлено", value=f"`{time_text}`", inline=True)
+            
+            # Содержание сообщения
             if message.content:
-                embed.add_field(name="Содержание", value=message.content[:1000], inline=False)
+                content = message.content[:1000] + "..." if len(message.content) > 1000 else message.content
+                embed.add_field(name="📝 Содержание", value=f"```{content}```", inline=False)
+            else:
+                embed.add_field(name="📝 Содержание", value="`[Пустое сообщение]`", inline=False)
             
+            # Вложения
             if message.attachments:
-                files = "\n".join([f"[{f.filename}]({f.url})" for f in message.attachments])
-                embed.add_field(name="Вложения", value=files[:1000], inline=False)
+                attachments_list = []
+                for i, att in enumerate(message.attachments, 1):
+                    attachments_list.append(f"{i}. [{att.filename}]({att.url}) ({(att.size/1024):.1f} KB)")
+                
+                attachments_text = "\n".join(attachments_list)
+                embed.add_field(name="📎 Вложения", value=attachments_text[:1000], inline=False)
             
-            embed.set_footer(text="by Ilya Vetrov • Удаленные сообщения")
+            # Упомянутые пользователи
+            if message.mentions:
+                mentions_list = [f"{m.mention} (`{m.id}`)" for m in message.mentions[:5]]
+                mentions_text = ", ".join(mentions_list)
+                if len(message.mentions) > 5:
+                    mentions_text += f" и ещё {len(message.mentions)-5}"
+                embed.add_field(name="👥 Упоминания", value=mentions_text[:500], inline=False)
+            
+            embed.set_footer(text=f"by Ilya Vetrov • ID сообщения: {message.id}")
+            
             await channel.send(embed=embed)
 
 @bot.event
 async def on_message_edit(before, after):
+    """Логирование измененных сообщений"""
     if before.author.bot or before.content == after.content or not before.guild:
         return
     
@@ -864,36 +896,125 @@ async def on_message_edit(before, after):
         channel = before.guild.get_channel(int(channel_id))
         if channel:
             embed = discord.Embed(
-                title="✏ Сообщение изменено",
+                title="✏ СООБЩЕНИЕ ИЗМЕНЕНО",
                 color=discord.Color.orange(),
                 timestamp=datetime.datetime.utcnow()
             )
-            embed.add_field(name="Автор", value=f"{before.author.mention}\nID: `{before.author.id}`", inline=True)
-            embed.add_field(name="Канал", value=before.channel.mention, inline=True)
-            embed.add_field(name="До", value=before.content[:500] or "[Пусто]", inline=False)
-            embed.add_field(name="После", value=after.content[:500] or "[Пусто]", inline=False)
             
-            embed.set_footer(text="by Ilya Vetrov • Измененные сообщения")
+            # Информация об авторе
+            author_text = f"{before.author.mention}\nID: `{before.author.id}`\nИмя: `{before.author.name}`"
+            embed.add_field(name="👤 Автор", value=author_text, inline=True)
+            
+            # Информация о канале
+            channel_text = f"{before.channel.mention}\nID: `{before.channel.id}`"
+            embed.add_field(name="📌 Канал", value=channel_text, inline=True)
+            
+            # Ссылка на сообщение
+            message_link = f"https://discord.com/channels/{before.guild.id}/{before.channel.id}/{before.id}"
+            embed.add_field(name="🔗 Ссылка", value=f"[Перейти]({message_link})", inline=True)
+            
+            # Было
+            old_content = before.content[:500] + "..." if len(before.content) > 500 else before.content
+            embed.add_field(name="📤 Было", value=f"```{old_content or '[Пусто]'}```", inline=False)
+            
+            # Стало
+            new_content = after.content[:500] + "..." if len(after.content) > 500 else after.content
+            embed.add_field(name="📥 Стало", value=f"```{new_content or '[Пусто]'}```", inline=False)
+            
+            embed.set_footer(text=f"by Ilya Vetrov • ID сообщения: {before.id}")
+            
             await channel.send(embed=embed)
 
 @bot.event
 async def on_bulk_message_delete(messages):
+    """Логирование массового удаления сообщений - ТОЖЕ КАЖДОЕ ОТДЕЛЬНО"""
     if not messages:
         return
-        
+    
     guild = messages[0].guild
-    if guild and str(guild.id) in settings.log_channels.get("bulk_delete", {}):
-        channel_id = settings.log_channels["bulk_delete"][str(guild.id)]
-        channel = guild.get_channel(int(channel_id))
-        if channel:
-            embed = discord.Embed(
-                title="🗑 Массовое удаление сообщений",
-                description=f"**Канал:** {messages[0].channel.mention}\n**Количество:** {len(messages)}",
+    if not guild:
+        return
+    
+    guild_id = str(guild.id)
+    
+    # Отправляем каждое удаленное сообщение отдельно
+    if guild_id in settings.log_channels.get("message_delete", {}):
+        channel_id = settings.log_channels["message_delete"][guild_id]
+        log_channel = guild.get_channel(int(channel_id))
+        
+        if log_channel:
+            # Сначала отправляем информационное сообщение о массовом удалении
+            info_embed = discord.Embed(
+                title="📦 МАССОВОЕ УДАЛЕНИЕ СООБЩЕНИЙ",
+                description=f"**Канал:** {messages[0].channel.mention}\n**Количество:** {len(messages)} сообщений",
                 color=discord.Color.red(),
                 timestamp=datetime.datetime.utcnow()
             )
-            embed.set_footer(text="by Ilya Vetrov • Массовые удаления")
-            await channel.send(embed=embed)
+            info_embed.set_footer(text="by Ilya Vetrov")
+            await log_channel.send(embed=info_embed)
+            
+            # Затем отправляем каждое сообщение отдельно (не больше 10, чтобы не спамить)
+            for i, message in enumerate(messages[:10]):  # Ограничиваем до 10 сообщений
+                if not message.author.bot:
+                    embed = discord.Embed(
+                        title=f"🗑 УДАЛЕННОЕ СООБЩЕНИЕ #{i+1}",
+                        color=discord.Color.red(),
+                        timestamp=datetime.datetime.utcnow()
+                    )
+                    
+                    author_text = f"{message.author.mention}\nID: `{message.author.id}`\nИмя: `{message.author.name}`"
+                    embed.add_field(name="👤 Автор", value=author_text, inline=True)
+                    
+                    if message.created_at:
+                        time_text = message.created_at.strftime("%d.%m.%Y %H:%M:%S")
+                        embed.add_field(name="⏰ Отправлено", value=f"`{time_text}`", inline=True)
+                    
+                    if message.content:
+                        content = message.content[:500] + "..." if len(message.content) > 500 else message.content
+                        embed.add_field(name="📝 Содержание", value=f"```{content}```", inline=False)
+                    
+                    embed.set_footer(text=f"by Ilya Vetrov • ID: {message.id}")
+                    
+                    await log_channel.send(embed=embed)
+            
+            if len(messages) > 10:
+                await log_channel.send(f"*... и ещё {len(messages) - 10} сообщений*")
+
+@bot.event
+async def on_member_update(before, after):
+    """Логирование изменений профиля пользователя (роли и никнеймы)"""
+    if before.bot or not before.guild:
+        return
+    
+    guild_id = str(before.guild.id)
+    
+    # Логирование смены никнейма
+    if guild_id in settings.log_channels.get("nickname", {}):
+        if before.nick != after.nick:
+            old_nick = before.nick or before.name
+            new_nick = after.nick or after.name
+            
+            description = f"📝 {before.mention} (`{before.id}`) **сменил никнейм**\n**Было:** `{old_nick}`\n**Стало:** `{new_nick}`"
+            await log_nickname(before.guild, description)
+    
+    # Логирование изменений ролей
+    if guild_id in settings.log_channels.get("role_give", {}):
+        before_roles = set(before.roles)
+        after_roles = set(after.roles)
+        
+        # Выданные роли
+        added_roles = after_roles - before_roles
+        for role in added_roles:
+            if role.name != "@everyone":
+                description = f"➕ {before.mention} (`{before.id}`) **получил роль** {role.mention}\n**ID роли:** `{role.id}`"
+                await log_role_give(before.guild, description, discord.Color.green())
+        
+        # Снятые роли
+        removed_roles = before_roles - after_roles
+        for role in removed_roles:
+            if role.name != "@everyone":
+                description = f"➖ {before.mention} (`{before.id}`) **лишился роли** {role.mention}\n**ID роли:** `{role.id}`"
+                await log_role_give(before.guild, description, discord.Color.red())
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -915,21 +1036,6 @@ async def on_voice_state_update(member, before, after):
     elif before.channel != after.channel:
         description = f"🔄 {member.mention} (`{member.id}`) **переместился** из {before.channel.mention} в {after.channel.mention}"
         await log_voice(member.guild, description, discord.Color.blue())
-
-@bot.event
-async def on_member_update(before, after):
-    if before.bot or not before.guild:
-        return
-    
-    guild_id = str(before.guild.id)
-    
-    if guild_id in settings.log_channels.get("nickname", {}):
-        if before.nick != after.nick:
-            old_nick = before.nick or before.name
-            new_nick = after.nick or after.name
-            
-            description = f"📝 {before.mention} (`{before.id}`) **сменил никнейм**\n**Было:** `{old_nick}`\n**Стало:** `{new_nick}`"
-            await log_nickname(before.guild, description)
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
