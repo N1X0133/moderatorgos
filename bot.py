@@ -195,10 +195,10 @@ async def send_to_log_channel(guild, log_type, embed):
         if channel:
             try:
                 await channel.send(embed=embed)
+                logger.info(f"📤 Отправлен лог в канал {channel.name} (тип: {log_type})")
             except Exception as e:
                 logger.error(f"Ошибка отправки в канал {log_type}: {e}")
     else:
-        # Если канал не настроен, логируем в консоль
         logger.info(f"[{log_type}] {embed.description if hasattr(embed, 'description') else embed.title}")
 
 async def log_mod_action(guild, action_description, color=discord.Color.blue()):
@@ -287,6 +287,39 @@ async def log_message_delete(guild, message):
             
             embed.set_footer(text=f"by Ilya Vetrov • ID сообщения: {message.id}")
             await channel.send(embed=embed)
+
+# ==================== КОМАНДА ДЛЯ ТЕСТА ЛОГОВ РОЛЕЙ ====================
+
+@bot.tree.command(name="test_role_log", description="Протестировать логирование ролей (выдать тестовую роль)")
+@is_admin_only()
+async def slash_test_role_log(interaction: discord.Interaction):
+    """Тестовая команда для проверки логирования ролей"""
+    await interaction.response.defer(ephemeral=True)
+    
+    # Проверяем настроен ли канал для логов ролей
+    guild_id = str(interaction.guild_id)
+    if guild_id in settings.log_channels.get("role_give", {}):
+        channel_id = settings.log_channels["role_give"][guild_id]
+        channel = interaction.guild.get_channel(int(channel_id))
+        if channel:
+            # Отправляем тестовый лог
+            test_embed = discord.Embed(
+                title="🧪 ТЕСТ ЛОГИРОВАНИЯ РОЛЕЙ",
+                description=f"Это тестовое сообщение для проверки канала логов ролей.\n\n"
+                            f"**Канал:** {channel.mention}\n"
+                            f"**ID канала:** `{channel.id}`\n\n"
+                            f"Если вы видите это сообщение, то канал настроен правильно!",
+                color=discord.Color.blue(),
+                timestamp=datetime.datetime.utcnow()
+            )
+            test_embed.set_footer(text="by Ilya Vetrov • Тест логов ролей")
+            await channel.send(embed=test_embed)
+            
+            await interaction.followup.send(f"✅ Тестовое сообщение отправлено в канал {channel.mention}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"❌ Канал с ID `{channel_id}` не найден!", ephemeral=True)
+    else:
+        await interaction.followup.send("❌ Канал для логов ролей не настроен! Используйте `/set_role_give_channel #канал`", ephemeral=True)
 
 # ==================== КОМАНДА ДЛЯ БЫСТРОЙ НАСТРОЙКИ ВСЕХ КАНАЛОВ ====================
 
@@ -390,7 +423,8 @@ async def slash_set_role_give_channel(interaction: discord.Interaction, channel:
     
     embed = discord.Embed(
         title="✅ Канал для изменений ролей установлен",
-        description=f"Выдача и снятие ролей будут логироваться в {channel.mention}",
+        description=f"Выдача и снятие ролей будут логироваться в {channel.mention}\n\n"
+                    f"⚠️ **Важно:** Убедитесь, что бот имеет право **«Просматривать аудит логов»** (View Audit Log) на сервере!",
         color=discord.Color.green()
     )
     embed.set_footer(text="by Ilya Vetrov • Настройка логов")
@@ -775,7 +809,7 @@ async def slash_help(interaction: discord.Interaction):
     
     embed.add_field(
         name="🧪 Тестирование",
-        value="`/test_welcome` - протестировать приветственное сообщение",
+        value="`/test_welcome` - протестировать приветственное сообщение\n`/test_role_log` - проверить канал логов ролей",
         inline=False
     )
     
@@ -986,6 +1020,7 @@ async def on_member_update(before, after):
             if role.name != "@everyone":
                 description = f"➕ {before.mention} (`{before.id}`) **получил роль** {role.mention}\n**ID роли:** `{role.id}`"
                 await log_role_give(before.guild, description, discord.Color.green())
+                logger.info(f"Лог роли (выдача): {description}")
         
         # Снятые роли
         removed_roles = before_roles - after_roles
@@ -993,6 +1028,7 @@ async def on_member_update(before, after):
             if role.name != "@everyone":
                 description = f"➖ {before.mention} (`{before.id}`) **лишился роли** {role.mention}\n**ID роли:** `{role.id}`"
                 await log_role_give(before.guild, description, discord.Color.red())
+                logger.info(f"Лог роли (снятие): {description}")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
