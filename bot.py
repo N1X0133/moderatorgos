@@ -285,6 +285,13 @@ async def log_message_delete(guild, message):
                 attachments_text = "\n".join(attachments_list)
                 embed.add_field(name="📎 Вложения", value=attachments_text[:1000], inline=False)
             
+            if message.mentions:
+                mentions_list = [f"{m.mention} (`{m.id}`)" for m in message.mentions[:5]]
+                mentions_text = ", ".join(mentions_list)
+                if len(message.mentions) > 5:
+                    mentions_text += f" и ещё {len(message.mentions)-5}"
+                embed.add_field(name="👥 Упоминания", value=mentions_text[:500], inline=False)
+            
             embed.set_footer(text=f"by Ilya Vetrov • ID сообщения: {message.id}")
             await channel.send(embed=embed)
 
@@ -408,7 +415,8 @@ async def slash_set_bulk_delete_channel(interaction: discord.Interaction, channe
     
     embed = discord.Embed(
         title="✅ Канал для массовых удалений установлен",
-        description=f"Массовые удаления будут логироваться в {channel.mention}",
+        description=f"Массовые удаления будут логироваться в {channel.mention}\n\n"
+                    f"⚠️ **Важно:** Каждое удаленное сообщение будет показано отдельно!",
         color=discord.Color.green()
     )
     embed.set_footer(text="by Ilya Vetrov • Настройка логов")
@@ -943,7 +951,7 @@ async def on_message_edit(before, after):
 
 @bot.event
 async def on_bulk_message_delete(messages):
-    """Логирование массового удаления сообщений"""
+    """Логирование массового удаления сообщений - ПОКАЗЫВАЕМ КАЖДОЕ СООБЩЕНИЕ ОТДЕЛЬНО"""
     if not messages:
         return
     
@@ -953,11 +961,17 @@ async def on_bulk_message_delete(messages):
     
     guild_id = str(guild.id)
     
-    if guild_id in settings.log_channels.get("message_delete", {}):
-        channel_id = settings.log_channels["message_delete"][guild_id]
-        log_channel = guild.get_channel(int(channel_id))
-        
+    # Используем канал для массовых удалений, если настроен, иначе message_delete
+    log_channel_id = None
+    if guild_id in settings.log_channels.get("bulk_delete", {}):
+        log_channel_id = settings.log_channels["bulk_delete"][guild_id]
+    elif guild_id in settings.log_channels.get("message_delete", {}):
+        log_channel_id = settings.log_channels["message_delete"][guild_id]
+    
+    if log_channel_id:
+        log_channel = guild.get_channel(int(log_channel_id))
         if log_channel:
+            # Информационное сообщение о массовом удалении
             info_embed = discord.Embed(
                 title="📦 МАССОВОЕ УДАЛЕНИЕ СООБЩЕНИЙ",
                 description=f"**Канал:** {messages[0].channel.mention}\n**Количество:** {len(messages)} сообщений",
@@ -967,30 +981,73 @@ async def on_bulk_message_delete(messages):
             info_embed.set_footer(text="by Ilya Vetrov")
             await log_channel.send(embed=info_embed)
             
-            for i, message in enumerate(messages[:10]):
-                if not message.author.bot:
-                    embed = discord.Embed(
-                        title=f"🗑 УДАЛЕННОЕ СООБЩЕНИЕ #{i+1}",
-                        color=discord.Color.red(),
-                        timestamp=datetime.datetime.utcnow()
-                    )
+            # Отправляем каждое удаленное сообщение отдельно (не больше 15, чтобы не спамить)
+            sent_count = 0
+            for i, message in enumerate(messages):
+                # Пропускаем сообщения ботов
+                if message.author.bot:
+                    continue
                     
-                    author_text = f"{message.author.mention}\nID: `{message.author.id}`\nИмя: `{message.author.name}`"
-                    embed.add_field(name="👤 Автор", value=author_text, inline=True)
-                    
-                    if message.created_at:
-                        time_text = message.created_at.strftime("%d.%m.%Y %H:%M:%S")
-                        embed.add_field(name="⏰ Отправлено", value=f"`{time_text}`", inline=True)
-                    
-                    if message.content:
-                        content = message.content[:500] + "..." if len(message.content) > 500 else message.content
-                        embed.add_field(name="📝 Содержание", value=f"```{content}```", inline=False)
-                    
-                    embed.set_footer(text=f"by Ilya Vetrov • ID: {message.id}")
-                    await log_channel.send(embed=embed)
+                if sent_count >= 15:  # Ограничиваем до 15 сообщений, чтобы не заспамить
+                    remaining = len(messages) - sent_count
+                    await log_channel.send(f"*... и ещё {remaining} сообщений (показаны первые 15)*")
+                    break
+                
+                embed = discord.Embed(
+                    title=f"🗑 УДАЛЕННОЕ СООБЩЕНИЕ #{i+1}",
+                    color=discord.Color.red(),
+                    timestamp=datetime.datetime.utcnow()
+                )
+                
+                # Автор
+                author_name = message.author.name
+                if message.author.nick:
+                    author_name = f"{message.author.nick} ({message.author.name})"
+                
+                author_text = f"{message.author.mention}\n**Имя:** `{author_name}`\n**ID:** `{message.author.id}`"
+                embed.add_field(name="👤 Автор", value=author_text, inline=True)
+                
+                # Канал
+                embed.add_field(name="📌 Канал", value=f"{message.channel.mention}\nID: `{message.channel.id}`", inline=True)
+                
+                # Время отправки
+                if message.created_at:
+                    time_text = message.created_at.strftime("%d.%m.%Y %H:%M:%S")
+                    embed.add_field(name="⏰ Отправлено", value=f"`{time_text}`", inline=True)
+                
+                # Содержание
+                if message.content:
+                    content = message.content[:800] + "..." if len(message.content) > 800 else message.content
+                    embed.add_field(name="📝 Содержание", value=f"```{content}```", inline=False)
+                else:
+                    embed.add_field(name="📝 Содержание", value="`[Пустое сообщение]`", inline=False)
+                
+                # Вложения
+                if message.attachments:
+                    attachments_list = []
+                    for att in message.attachments:
+                        attachments_list.append(f"[{att.filename}]({att.url})")
+                    attachments_text = "\n".join(attachments_list)
+                    embed.add_field(name="📎 Вложения", value=attachments_text[:500], inline=False)
+                
+                # Упоминания
+                if message.mentions:
+                    mentions_list = [f"{m.mention}" for m in message.mentions[:3]]
+                    mentions_text = ", ".join(mentions_list)
+                    if len(message.mentions) > 3:
+                        mentions_text += f" и ещё {len(message.mentions)-3}"
+                    embed.add_field(name="👥 Упоминания", value=mentions_text, inline=False)
+                
+                embed.set_footer(text=f"by Ilya Vetrov • ID сообщения: {message.id}")
+                await log_channel.send(embed=embed)
+                sent_count += 1
+                
+                # Небольшая задержка, чтобы избежать rate limit
+                await asyncio.sleep(0.5)
             
-            if len(messages) > 10:
-                await log_channel.send(f"*... и ещё {len(messages) - 10} сообщений*")
+            # Если не отправили ни одного сообщения (все были от ботов)
+            if sent_count == 0 and len(messages) > 0:
+                await log_channel.send(f"*Все {len(messages)} удаленных сообщений были от ботов*")
 
 @bot.event
 async def on_member_update(before, after):
