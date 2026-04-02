@@ -295,6 +295,45 @@ async def log_message_delete(guild, message):
             embed.set_footer(text=f"by Ilya Vetrov • ID сообщения: {message.id}")
             await channel.send(embed=embed)
 
+# ==================== ФУНКЦИЯ ПОЛУЧЕНИЯ ИНФОРМАЦИИ О ВЫДАТЧИКЕ РОЛИ ====================
+
+async def get_role_moderator(guild, target, role, action_type):
+    """
+    Получает информацию о том, кто выдал/снял роль из аудит-лога
+    action_type: "add" для выдачи, "remove" для снятия
+    Возвращает строку с информацией о модераторе
+    """
+    try:
+        # Определяем тип действия для аудит-лога
+        if action_type == "add":
+            action = discord.AuditLogAction.member_role_update
+        else:
+            action = discord.AuditLogAction.member_role_update
+        
+        # Ждем немного, чтобы аудит-лог успел обновиться
+        await asyncio.sleep(0.5)
+        
+        # Ищем в аудит-логе последние 10 записей
+        async for entry in guild.audit_logs(limit=10, action=action):
+            if entry.target.id == target.id:
+                # Проверяем, была ли изменена именно эта роль
+                if action_type == "add" and role in entry.after.roles and role not in entry.before.roles:
+                    moderator = entry.user
+                    return f"**Выдал:** {moderator.mention} (`{moderator.id}`)"
+                elif action_type == "remove" and role in entry.before.roles and role not in entry.after.roles:
+                    moderator = entry.user
+                    return f"**Снял:** {moderator.mention} (`{moderator.id}`)"
+        
+        # Если не нашли в аудит-логе, возможно, роль выдал бот или система
+        return f"**Инициатор:** `Система/Бот (не удалось определить)`"
+        
+    except discord.Forbidden:
+        logger.warning(f"⚠️ Нет прав на просмотр аудит-лога на сервере {guild.name}")
+        return f"**Инициатор:** `Не удалось определить (нет прав на аудит-лог)`"
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении аудит-лога: {e}")
+        return f"**Инициатор:** `Не удалось определить ({str(e)})`"
+
 # ==================== КОМАНДА ДЛЯ ТЕСТА ЛОГОВ РОЛЕЙ ====================
 
 @bot.tree.command(name="test_role_log", description="Протестировать логирование ролей (выдать тестовую роль)")
@@ -315,7 +354,12 @@ async def slash_test_role_log(interaction: discord.Interaction):
                 description=f"Это тестовое сообщение для проверки канала логов ролей.\n\n"
                             f"**Канал:** {channel.mention}\n"
                             f"**ID канала:** `{channel.id}`\n\n"
-                            f"Если вы видите это сообщение, то канал настроен правильно!",
+                            f"Если вы видите это сообщение, то канал настроен правильно!\n\n"
+                            f"**Формат логов ролей:**\n"
+                            f"• Кто выдал/снял роль\n"
+                            f"• Кому выдал/снял роль\n"
+                            f"• Какую роль\n"
+                            f"• Время действия",
                 color=discord.Color.blue(),
                 timestamp=datetime.datetime.utcnow()
             )
@@ -350,7 +394,7 @@ async def slash_setup_all_logs(interaction: discord.Interaction, channel: discor
                     f"• 🗑️ Удаленные сообщения\n"
                     f"• ✏️ Измененные сообщения\n"
                     f"• 📦 Массовые удаления\n"
-                    f"• 👥 Выдача/снятие ролей\n"
+                    f"• 👥 Выдача/снятие ролей (с указанием кто выдал)\n"
                     f"• ⚠️ Предупреждения\n"
                     f"• 🔊 Голосовые каналы\n"
                     f"• 📝 Смена никнеймов",
@@ -432,7 +476,11 @@ async def slash_set_role_give_channel(interaction: discord.Interaction, channel:
     embed = discord.Embed(
         title="✅ Канал для изменений ролей установлен",
         description=f"Выдача и снятие ролей будут логироваться в {channel.mention}\n\n"
-                    f"⚠️ **Важно:** Убедитесь, что бот имеет право **«Просматривать аудит логов»** (View Audit Log) на сервере!",
+                    f"⚠️ **Важно:** Убедитесь, что бот имеет право **«Просматривать аудит логов»** (View Audit Log) на сервере!\n\n"
+                    f"📝 **Формат логов:**\n"
+                    f"• Кто выдал/снял роль\n"
+                    f"• Кому выдал/снял роль\n"
+                    f"• Какая роль",
         color=discord.Color.green()
     )
     embed.set_footer(text="by Ilya Vetrov • Настройка логов")
@@ -499,7 +547,7 @@ async def slash_show_log_channels(interaction: discord.Interaction):
         "message_delete": "🗑️ Удаленные сообщения",
         "message_edit": "✏️ Измененные сообщения",
         "bulk_delete": "📦 Массовые удаления",
-        "role_give": "👥 Изменение ролей",
+        "role_give": "👥 Изменение ролей (с указанием кто выдал)",
         "warns": "⚠️ Предупреждения",
         "voice": "🔊 Голосовые каналы",
         "nickname": "📝 Смена никнеймов"
@@ -538,7 +586,7 @@ async def slash_set_join_role(interaction: discord.Interaction, role: discord.Ro
     )
     embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
     await interaction.response.send_message(embed=embed)
-    await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} (`{interaction.user.id}`) установил автоматическую выдачу роли {role.mention} для новичков", discord.Color.blue())
+    await log_role_give(interaction.guild, f"⚙️ **Выдал:** {interaction.user.mention} (`{interaction.user.id}`)\n**Пользователь:** Система\n**Действие:** Установил автоматическую выдачу роли {role.mention} для новичков", discord.Color.blue())
 
 @bot.tree.command(name="remove_join_role", description="Отключить автоматическую выдачу роли")
 @is_admin_only()
@@ -554,7 +602,7 @@ async def slash_remove_join_role(interaction: discord.Interaction):
         )
         embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
         await interaction.response.send_message(embed=embed)
-        await log_role_give(interaction.guild, f"⚙️ {interaction.user.mention} (`{interaction.user.id}`) отключил автовыдачу роли", discord.Color.blue())
+        await log_role_give(interaction.guild, f"⚙️ **Выдал:** {interaction.user.mention} (`{interaction.user.id}`)\n**Пользователь:** Система\n**Действие:** Отключил автовыдачу роли", discord.Color.blue())
     else:
         await interaction.response.send_message("❌ Автовыдача роли не была настроена", ephemeral=True)
 
@@ -801,7 +849,7 @@ async def slash_help(interaction: discord.Interaction):
               "`/set_message_delete_channel` - удаленные сообщения\n"
               "`/set_message_edit_channel` - измененные сообщения\n"
               "`/set_bulk_delete_channel` - массовые удаления\n"
-              "`/set_role_give_channel` - выдача/снятие ролей\n"
+              "`/set_role_give_channel` - выдача/снятие ролей (с указанием кто выдал)\n"
               "`/set_warns_channel` - предупреждения\n"
               "`/set_voice_channel` - голосовые каналы\n"
               "`/set_nickname_channel` - смена никнеймов\n"
@@ -817,7 +865,7 @@ async def slash_help(interaction: discord.Interaction):
     
     embed.add_field(
         name="🧪 Тестирование",
-        value="`/test_welcome` - протестировать приветственное сообщение\n`/test_role_log` - проверить канал логов ролей",
+        value="`/test_role_log` - проверить канал логов ролей",
         inline=False
     )
     
@@ -1075,7 +1123,9 @@ async def on_member_update(before, after):
         added_roles = after_roles - before_roles
         for role in added_roles:
             if role.name != "@everyone":
-                description = f"➕ {before.mention} (`{before.id}`) **получил роль** {role.mention}\n**ID роли:** `{role.id}`"
+                # Получаем информацию о том, кто выдал роль из аудит-лога
+                moderator_info = await get_role_moderator(before.guild, before, role, "add")
+                description = f"{moderator_info}\n**Пользователь:** {before.mention} (`{before.id}`)\n**Получил роль:** {role.mention}\n**ID роли:** `{role.id}`"
                 await log_role_give(before.guild, description, discord.Color.green())
                 logger.info(f"Лог роли (выдача): {description}")
         
@@ -1083,7 +1133,9 @@ async def on_member_update(before, after):
         removed_roles = before_roles - after_roles
         for role in removed_roles:
             if role.name != "@everyone":
-                description = f"➖ {before.mention} (`{before.id}`) **лишился роли** {role.mention}\n**ID роли:** `{role.id}`"
+                # Получаем информацию о том, кто снял роль из аудит-лога
+                moderator_info = await get_role_moderator(before.guild, before, role, "remove")
+                description = f"{moderator_info}\n**Пользователь:** {before.mention} (`{before.id}`)\n**Лишился роли:** {role.mention}\n**ID роли:** `{role.id}`"
                 await log_role_give(before.guild, description, discord.Color.red())
                 logger.info(f"Лог роли (снятие): {description}")
 
