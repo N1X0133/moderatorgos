@@ -212,7 +212,8 @@ class ModerationBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
         self.start_time = datetime.datetime.utcnow()
-        self.leaders_messages = {}  # Словарь для хранения ID сообщений лидеров
+        self.leaders_message_id = None  # ID сообщения лидеров
+        self.curators_message_id = None  # ID сообщения кураторов
         
     async def setup_hook(self):
         await self.tree.sync()
@@ -1021,101 +1022,6 @@ async def test_role_log(interaction: discord.Interaction):
     else:
         await interaction.followup.send("❌ Канал для логов ролей не настроен! Используйте `/set_role_give_channel #канал`", ephemeral=True)
 
-# ==================== КОМАНДЫ ДЛЯ ЛИДЕРОВ ====================
-
-@bot.tree.command(name="лидеры", description="📢 Отправить или обновить список лидеров")
-@app_commands.describe(
-    текст="Текст списка лидеров (можно использовать форматирование)"
-)
-@is_allowed_only()
-async def leaders_list(interaction: discord.Interaction, текст: str):
-    """Отправляет или обновляет список лидеров в канале"""
-    
-    leaders_channel = bot.get_channel(LEADERS_CHANNEL_ID)
-    if not leaders_channel:
-        await interaction.response.send_message(f"❌ Канал для лидеров не найден! ID: {LEADERS_CHANNEL_ID}", ephemeral=True)
-        return
-    
-    embed = discord.Embed(
-        title="👑 СПИСОК ЛИДЕРОВ ФРАКЦИЙ",
-        description=текст,
-        color=discord.Color.gold(),
-        timestamp=datetime.datetime.utcnow()
-    )
-    embed.set_author(
-        name=interaction.user.name,
-        icon_url=interaction.user.avatar.url if interaction.user.avatar else None
-    )
-    embed.set_footer(text="by Ilya Vetrov • Актуальный список лидеров")
-    
-    if interaction.guild.icon:
-        embed.set_thumbnail(url=interaction.guild.icon.url)
-    
-    guild_id = str(interaction.guild_id)
-    
-    # Проверяем, есть ли уже сохраненное сообщение
-    if guild_id in bot.leaders_messages and bot.leaders_messages[guild_id]:
-        try:
-            old_message_id = bot.leaders_messages[guild_id]
-            old_message = await leaders_channel.fetch_message(old_message_id)
-            await old_message.edit(embed=embed)
-            await interaction.response.send_message(f"✅ Список лидеров **обновлен** в канале <#{LEADERS_CHANNEL_ID}>", ephemeral=True)
-            return
-        except:
-            pass
-    
-    # Отправляем новое сообщение
-    message = await leaders_channel.send(embed=embed)
-    bot.leaders_messages[guild_id] = message.id
-    await interaction.response.send_message(f"✅ Список лидеров **отправлен** в канал <#{LEADERS_CHANNEL_ID}>", ephemeral=True)
-
-
-@bot.tree.command(name="сброс_лидеры", description="🔄 Сбросить ID сообщения лидеров (если сообщение было удалено)")
-@is_allowed_only()
-async def leaders_reset(interaction: discord.Interaction):
-    """Сбрасывает сохраненный ID сообщения лидеров"""
-    
-    guild_id = str(interaction.guild_id)
-    
-    if guild_id in bot.leaders_messages:
-        del bot.leaders_messages[guild_id]
-        await interaction.response.send_message("✅ ID сообщения лидеров сброшен. При следующем использовании `/лидеры` создаст новое сообщение.", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ Нет сохраненного ID сообщения лидеров.", ephemeral=True)
-
-
-@bot.tree.command(name="кураторы", description="📢 Отправить или обновить список кураторов")
-@app_commands.describe(
-    текст="Текст списка кураторов (можно использовать форматирование)"
-)
-@is_allowed_only()
-async def curators_list(interaction: discord.Interaction, текст: str):
-    """Отправляет или обновляет список кураторов в канале"""
-    
-    curators_channel = bot.get_channel(CURATOR_CHANNEL_ID)
-    if not curators_channel:
-        await interaction.response.send_message(f"❌ Канал для кураторов не найден! ID: {CURATOR_CHANNEL_ID}", ephemeral=True)
-        return
-    
-    embed = discord.Embed(
-        title="👥 СПИСОК КУРАТОРОВ",
-        description=текст,
-        color=discord.Color.blue(),
-        timestamp=datetime.datetime.utcnow()
-    )
-    embed.set_author(
-        name=interaction.user.name,
-        icon_url=interaction.user.avatar.url if interaction.user.avatar else None
-    )
-    embed.set_footer(text="by Ilya Vetrov • Актуальный список кураторов")
-    
-    if interaction.guild.icon:
-        embed.set_thumbnail(url=interaction.guild.icon.url)
-    
-    # Для кураторов пока не делаем сохранение ID, просто отправляем
-    await curators_channel.send(embed=embed)
-    await interaction.response.send_message(f"✅ Список кураторов **отправлен** в канал <#{CURATOR_CHANNEL_ID}>", ephemeral=True)
-
 
 @bot.tree.command(name="help", description="Показать список команд")
 async def help_command(interaction: discord.Interaction):
@@ -1138,11 +1044,269 @@ async def help_command(interaction: discord.Interaction):
                     inline=False)
     
     embed.add_field(name="📢 Списки",
-                    value="`/лидеры` - отправить/обновить список лидеров\n`/сброс_лидеры` - сбросить ID сообщения лидеров\n`/кураторы` - отправить список кураторов",
+                    value="`!лидеры Текст` - отправить/обновить список лидеров\n`!кураторы Текст` - отправить/обновить список кураторов\n`!сбросить_лидеры` - сбросить ID сообщения лидеров\n`!сбросить_кураторы` - сбросить ID сообщения кураторов",
                     inline=False)
     
     embed.set_footer(text="by Ilya Vetrov • Все настройки сохраняются автоматически")
     await interaction.response.send_message(embed=embed)
+
+
+# ==================== ПРЕФИКСНЫЕ КОМАНДЫ ====================
+
+@bot.command(name='синхронизировать')
+async def sync_command(ctx):
+    if ctx.author.id in MAIN_ADMIN_IDS:
+        await bot.tree.sync()
+        await ctx.send("✅ Слэш-команды синхронизированы! by Ilya Vetrov")
+    else:
+        await ctx.send("❌ Только администраторы!")
+
+@bot.command(name='статус')
+async def status_command(ctx):
+    if ctx.author.id in MAIN_ADMIN_IDS:
+        embed = discord.Embed(title="🤖 СТАТУС БОТА", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
+        embed.add_field(name="📱 Имя бота", value=f"```{bot.user.name}```", inline=True)
+        embed.add_field(name="🆔 ID", value=f"```{bot.user.id}```", inline=True)
+        embed.add_field(name="🌐 Серверов", value=f"```{len(bot.guilds)}```", inline=True)
+        embed.add_field(name="⚙️ Автовыдача ролей", value=f"```{len(data_manager.settings['join_roles'])} серверов```", inline=True)
+        
+        total_channels = sum(len(channels) for channels in data_manager.settings["log_channels"].values())
+        embed.add_field(name="📋 Каналов логов", value=f"```{total_channels}```", inline=True)
+        
+        total_warns = sum(len(warns) for warns in data_manager.settings["warns"].values())
+        embed.add_field(name="⚠️ Предупреждений", value=f"```{total_warns}```", inline=True)
+        
+        uptime = datetime.datetime.utcnow() - bot.start_time
+        days = uptime.days
+        hours = uptime.seconds // 3600
+        minutes = (uptime.seconds % 3600) // 60
+        embed.add_field(name="⏱️ Время работы", value=f"```{days}д {hours}ч {minutes}м```", inline=True)
+        
+        embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send("❌ Только администраторы!")
+
+@bot.command(name='бэкап')
+async def backup_command(ctx):
+    if ctx.author.id in MAIN_ADMIN_IDS:
+        await ctx.send("🔄 Создание бэкапа настроек...")
+        
+        backup_data = data_manager.settings
+        backup_file = f"full_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        filepath = os.path.join('/tmp', backup_file)
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(backup_data, f, ensure_ascii=False, indent=4)
+            
+            with open(filepath, 'rb') as f:
+                await ctx.send(
+                    content=f"✅ **Полный бэкап настроек создан!**\n📅 Дата: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}",
+                    file=discord.File(f, filename=backup_file)
+                )
+            
+            os.remove(filepath)
+        except Exception as e:
+            await ctx.send(f"❌ Ошибка при создании бэкапа: {e}")
+    else:
+        await ctx.send("❌ Только главный администратор может создавать бэкапы!")
+
+
+# ==================== КОМАНДЫ ДЛЯ ЛИДЕРОВ И КУРАТОРОВ ====================
+
+@bot.command(name='лидеры')
+async def leaders_command(ctx, *, текст: str = None):
+    """👑 Отправить или обновить список лидеров в канал 904495052330508308"""
+    
+    # Проверка прав (только админы)
+    if ctx.author.id not in MAIN_ADMIN_IDS:
+        await ctx.send("❌ Только администраторы могут использовать эту команду!")
+        return
+    
+    # Получаем канал для лидеров
+    leaders_channel = bot.get_channel(LEADERS_CHANNEL_ID)
+    if not leaders_channel:
+        await ctx.send(f"❌ Канал для лидеров не найден! ID: {LEADERS_CHANNEL_ID}")
+        return
+    
+    # Если текст не указан, показываем текущий список или инструкцию
+    if текст is None:
+        if bot.leaders_message_id:
+            try:
+                old_message = await leaders_channel.fetch_message(bot.leaders_message_id)
+                embed = old_message.embeds[0] if old_message.embeds else None
+                if embed and embed.description:
+                    await ctx.send(f"📋 **Текущий список лидеров:**\n\n{embed.description}")
+                else:
+                    await ctx.send("📋 Используйте: `!лидеры Текст списка лидеров`")
+            except:
+                await ctx.send("📋 Используйте: `!лидеры Текст списка лидеров`")
+        else:
+            await ctx.send("📋 Используйте: `!лидеры Текст списка лидеров`")
+        return
+    
+    # Создаем embed для лидеров
+    embed = discord.Embed(
+        title="👑 СПИСОК ЛИДЕРОВ ФРАКЦИЙ",
+        description=текст,
+        color=discord.Color.gold(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.set_author(
+        name=ctx.author.display_name,
+        icon_url=ctx.author.avatar.url if ctx.author.avatar else None
+    )
+    embed.set_footer(text="by Ilya Vetrov • Актуальный список лидеров")
+    
+    if ctx.guild and ctx.guild.icon:
+        embed.set_thumbnail(url=ctx.guild.icon.url)
+    
+    # Проверяем, есть ли уже сохраненное сообщение
+    if bot.leaders_message_id:
+        try:
+            old_message = await leaders_channel.fetch_message(bot.leaders_message_id)
+            await old_message.edit(embed=embed)
+            await ctx.send(f"✅ Список лидеров **обновлен** в канале {leaders_channel.mention}")
+            return
+        except:
+            # Если не удалось найти сообщение, создаем новое
+            pass
+    
+    # Отправляем новое сообщение
+    message = await leaders_channel.send(embed=embed)
+    bot.leaders_message_id = message.id
+    await ctx.send(f"✅ Список лидеров **отправлен** в канал {leaders_channel.mention}")
+
+
+@bot.command(name='кураторы')
+async def curators_command(ctx, *, текст: str = None):
+    """👥 Отправить или обновить список кураторов в канал 1178309021065809951"""
+    
+    # Проверка прав (только админы)
+    if ctx.author.id not in MAIN_ADMIN_IDS:
+        await ctx.send("❌ Только администраторы могут использовать эту команду!")
+        return
+    
+    # Получаем канал для кураторов
+    curators_channel = bot.get_channel(CURATOR_CHANNEL_ID)
+    if not curators_channel:
+        await ctx.send(f"❌ Канал для кураторов не найден! ID: {CURATOR_CHANNEL_ID}")
+        return
+    
+    # Если текст не указан, показываем текущий список или инструкцию
+    if текст is None:
+        if bot.curators_message_id:
+            try:
+                old_message = await curators_channel.fetch_message(bot.curators_message_id)
+                embed = old_message.embeds[0] if old_message.embeds else None
+                if embed and embed.description:
+                    await ctx.send(f"📋 **Текущий список кураторов:**\n\n{embed.description}")
+                else:
+                    await ctx.send("📋 Используйте: `!кураторы Текст списка кураторов`")
+            except:
+                await ctx.send("📋 Используйте: `!кураторы Текст списка кураторов`")
+        else:
+            await ctx.send("📋 Используйте: `!кураторы Текст списка кураторов`")
+        return
+    
+    # Создаем embed для кураторов
+    embed = discord.Embed(
+        title="👥 СПИСОК КУРАТОРОВ",
+        description=текст,
+        color=discord.Color.blue(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.set_author(
+        name=ctx.author.display_name,
+        icon_url=ctx.author.avatar.url if ctx.author.avatar else None
+    )
+    embed.set_footer(text="by Ilya Vetrov • Актуальный список кураторов")
+    
+    if ctx.guild and ctx.guild.icon:
+        embed.set_thumbnail(url=ctx.guild.icon.url)
+    
+    # Проверяем, есть ли уже сохраненное сообщение
+    if bot.curators_message_id:
+        try:
+            old_message = await curators_channel.fetch_message(bot.curators_message_id)
+            await old_message.edit(embed=embed)
+            await ctx.send(f"✅ Список кураторов **обновлен** в канале {curators_channel.mention}")
+            return
+        except:
+            # Если не удалось найти сообщение, создаем новое
+            pass
+    
+    # Отправляем новое сообщение
+    message = await curators_channel.send(embed=embed)
+    bot.curators_message_id = message.id
+    await ctx.send(f"✅ Список кураторов **отправлен** в канал {curators_channel.mention}")
+
+
+@bot.command(name='сбросить_лидеры')
+async def reset_leaders_command(ctx):
+    """🔄 Сбросить ID сообщения лидеров (если сообщение было удалено)"""
+    
+    if ctx.author.id not in MAIN_ADMIN_IDS:
+        await ctx.send("❌ Только администраторы могут использовать эту команду!")
+        return
+    
+    if bot.leaders_message_id:
+        bot.leaders_message_id = None
+        await ctx.send("✅ ID сообщения лидеров сброшен. При следующем использовании `!лидеры` создаст новое сообщение.")
+    else:
+        await ctx.send("❌ Нет сохраненного ID сообщения лидеров.")
+
+
+@bot.command(name='сбросить_кураторы')
+async def reset_curators_command(ctx):
+    """🔄 Сбросить ID сообщения кураторов (если сообщение было удалено)"""
+    
+    if ctx.author.id not in MAIN_ADMIN_IDS:
+        await ctx.send("❌ Только администраторы могут использовать эту команду!")
+        return
+    
+    if bot.curators_message_id:
+        bot.curators_message_id = None
+        await ctx.send("✅ ID сообщения кураторов сброшен. При следующем использовании `!кураторы` создаст новое сообщение.")
+    else:
+        await ctx.send("❌ Нет сохраненного ID сообщения кураторов.")
+
+
+@bot.command(name='объявление')
+async def announcement_command(ctx, *, текст: str):
+    """📢 Отправить объявление в канал (только для админов)"""
+    
+    if ctx.author.id not in MAIN_ADMIN_IDS:
+        await ctx.send("❌ Только администраторы могут использовать эту команду!")
+        return
+    
+    # Пробуем найти канал для объявлений
+    announce_channel = None
+    if 'ANNOUNCE_CHANNEL_ID' in dir() and ANNOUNCE_CHANNEL_ID:
+        announce_channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
+    
+    if not announce_channel:
+        announce_channel = bot.get_channel(WELCOME_CHANNEL_ID)
+    
+    if not announce_channel:
+        await ctx.send(f"❌ Канал для объявлений не найден!")
+        return
+    
+    embed = discord.Embed(
+        title="📢 ОБЪЯВЛЕНИЕ АДМИНИСТРАЦИИ",
+        description=текст,
+        color=discord.Color.purple(),
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.set_author(
+        name=ctx.author.display_name,
+        icon_url=ctx.author.avatar.url if ctx.author.avatar else None
+    )
+    embed.set_footer(text="by Ilya Vetrov")
+    
+    await announce_channel.send(embed=embed)
+    await ctx.send(f"✅ Объявление отправлено в канал {announce_channel.mention}")
 
 # ==================== СОБЫТИЯ ====================
 
@@ -1244,67 +1408,6 @@ async def on_voice_state_update(member, before, after):
 async def on_command_error(ctx, error):
     if isinstance(error, commands.NotOwner):
         await ctx.send("❌ Только администраторы могут использовать эту команду!")
-
-# ==================== ПРЕФИКСНЫЕ КОМАНДЫ ====================
-
-@bot.command(name='синхронизировать')
-async def sync_command(ctx):
-    if ctx.author.id in MAIN_ADMIN_IDS:
-        await bot.tree.sync()
-        await ctx.send("✅ Слэш-команды синхронизированы! by Ilya Vetrov")
-    else:
-        await ctx.send("❌ Только администраторы!")
-
-@bot.command(name='статус')
-async def status_command(ctx):
-    if ctx.author.id in MAIN_ADMIN_IDS:
-        embed = discord.Embed(title="🤖 СТАТУС БОТА", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
-        embed.add_field(name="📱 Имя бота", value=f"```{bot.user.name}```", inline=True)
-        embed.add_field(name="🆔 ID", value=f"```{bot.user.id}```", inline=True)
-        embed.add_field(name="🌐 Серверов", value=f"```{len(bot.guilds)}```", inline=True)
-        embed.add_field(name="⚙️ Автовыдача ролей", value=f"```{len(data_manager.settings['join_roles'])} серверов```", inline=True)
-        
-        total_channels = sum(len(channels) for channels in data_manager.settings["log_channels"].values())
-        embed.add_field(name="📋 Каналов логов", value=f"```{total_channels}```", inline=True)
-        
-        total_warns = sum(len(warns) for warns in data_manager.settings["warns"].values())
-        embed.add_field(name="⚠️ Предупреждений", value=f"```{total_warns}```", inline=True)
-        
-        uptime = datetime.datetime.utcnow() - bot.start_time
-        days = uptime.days
-        hours = uptime.seconds // 3600
-        minutes = (uptime.seconds % 3600) // 60
-        embed.add_field(name="⏱️ Время работы", value=f"```{days}д {hours}ч {minutes}м```", inline=True)
-        
-        embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
-        await ctx.send(embed=embed)
-    else:
-        await ctx.send("❌ Только администраторы!")
-
-@bot.command(name='бэкап')
-async def backup_command(ctx):
-    if ctx.author.id in MAIN_ADMIN_IDS:
-        await ctx.send("🔄 Создание бэкапа настроек...")
-        
-        backup_data = data_manager.settings
-        backup_file = f"full_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        filepath = os.path.join('/tmp', backup_file)
-        
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(backup_data, f, ensure_ascii=False, indent=4)
-            
-            with open(filepath, 'rb') as f:
-                await ctx.send(
-                    content=f"✅ **Полный бэкап настроек создан!**\n📅 Дата: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}",
-                    file=discord.File(f, filename=backup_file)
-                )
-            
-            os.remove(filepath)
-        except Exception as e:
-            await ctx.send(f"❌ Ошибка при создании бэкапа: {e}")
-    else:
-        await ctx.send("❌ Только главный администратор может создавать бэкапы!")
 
 # ==================== ЗАПУСК ====================
 
