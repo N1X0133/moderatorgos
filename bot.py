@@ -8,19 +8,20 @@ import json
 import os
 import aiofiles
 from typing import Optional
+from threading import Lock
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ID главного администратора (зафиксирован)
-MAIN_ADMIN_ID = 927642459998138418
+# ID главных администраторов (кто может использовать спецкоманды)
+MAIN_ADMIN_IDS = [927642459998138418, 500965898476322817]
 
 # ID вашего сервера и каналов
-YOUR_GUILD_ID = 886219875452854292  # ID сервера
-WELCOME_CHANNEL_ID = 886221288421589004  # Канал для приветствий
-CURATOR_CHANNEL_ID = 1178309021065809951  # Канал с кураторами
-BALANCE_CHANNEL_ID = 1444397866499182665  # Канал с балловой системой
+YOUR_GUILD_ID = 886219875452854292
+WELCOME_CHANNEL_ID = 886221288421589004
+CURATOR_CHANNEL_ID = 1178309021065809951
+BALANCE_CHANNEL_ID = 1444397866499182665
 
 # Настройки бота
 intents = discord.Intents.default()
@@ -30,237 +31,285 @@ intents.guilds = True
 intents.moderation = True
 intents.voice_states = True
 
+# ==================== СИСТЕМА ХРАНЕНИЯ ДАННЫХ ====================
+
+class PersistentDataManager:
+    def __init__(self):
+        self.data_folder = '/app/data'
+        self.backup_folder = os.path.join(self.data_folder, 'backups')
+        self._lock = Lock()
+        self.ensure_folders()
+        self.settings = self.load_settings()
+        
+    def ensure_folders(self):
+        os.makedirs(self.data_folder, exist_ok=True)
+        os.makedirs(self.backup_folder, exist_ok=True)
+        logger.info(f"📁 Папки данных: {self.data_folder}")
+        
+    def load_settings(self):
+        settings_file = os.path.join(self.data_folder, 'bot_settings.json')
+        
+        default_settings = {
+            "version": "2.0",
+            "last_updated": datetime.datetime.utcnow().isoformat(),
+            "join_roles": {},
+            "log_channels": {
+                "mod_actions": {},
+                "message_delete": {},
+                "message_edit": {},
+                "bulk_delete": {},
+                "role_give": {},
+                "warns": {},
+                "voice": {},
+                "nickname": {}
+            },
+            "mod_logs": {},
+            "warns": {},
+            "embed_templates": {}
+        }
+        
+        try:
+            if os.path.exists(settings_file):
+                with open(settings_file, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                    # Конвертируем ключи
+                    for key in ['join_roles', 'mod_logs', 'warns']:
+                        if key in loaded:
+                            loaded[key] = {int(k) if k.isdigit() else k: v for k, v in loaded[key].items()}
+                    
+                    if 'log_channels' in loaded:
+                        for log_type in loaded['log_channels']:
+                            loaded['log_channels'][log_type] = {
+                                int(k) if k.isdigit() else k: v 
+                                for k, v in loaded['log_channels'][log_type].items()
+                            }
+                    
+                    logger.info(f"✅ Загружены настройки")
+                    return loaded
+            else:
+                self.save_settings(default_settings)
+                return default_settings
+        except Exception as e:
+            logger.error(f"Ошибка загрузки: {e}")
+            return default_settings
+    
+    def save_settings(self, settings=None):
+        with self._lock:
+            if settings is None:
+                settings = self.settings
+            
+            settings["last_updated"] = datetime.datetime.utcnow().isoformat()
+            settings_file = os.path.join(self.data_folder, 'bot_settings.json')
+            
+            # Создаем бэкап
+            if os.path.exists(settings_file):
+                backup_file = os.path.join(self.backup_folder, f"backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+                try:
+                    import shutil
+                    shutil.copy2(settings_file, backup_file)
+                except:
+                    pass
+            
+            try:
+                # Конвертируем int ключи в строки для JSON
+                save_data = self._prepare_for_json(settings)
+                with open(settings_file, 'w', encoding='utf-8') as f:
+                    json.dump(save_data, f, ensure_ascii=False, indent=4)
+                return True
+            except Exception as e:
+                logger.error(f"Ошибка сохранения: {e}")
+                return False
+    
+    def _prepare_for_json(self, data):
+        if isinstance(data, dict):
+            result = {}
+            for k, v in data.items():
+                new_key = str(k) if isinstance(k, int) else k
+                result[new_key] = self._prepare_for_json(v)
+            return result
+        elif isinstance(data, list):
+            return [self._prepare_for_json(item) for item in data]
+        else:
+            return data
+    
+    def get_join_role(self, guild_id):
+        return self.settings["join_roles"].get(guild_id)
+    
+    def set_join_role(self, guild_id, role_id):
+        self.settings["join_roles"][guild_id] = role_id
+        self.save_settings()
+    
+    def remove_join_role(self, guild_id):
+        if guild_id in self.settings["join_roles"]:
+            del self.settings["join_roles"][guild_id]
+            self.save_settings()
+            return True
+        return False
+    
+    def get_log_channel(self, guild_id, log_type):
+        return self.settings["log_channels"].get(log_type, {}).get(guild_id)
+    
+    def set_log_channel(self, guild_id, log_type, channel_id):
+        if log_type not in self.settings["log_channels"]:
+            self.settings["log_channels"][log_type] = {}
+        self.settings["log_channels"][log_type][guild_id] = channel_id
+        self.save_settings()
+    
+    def get_warns(self, guild_id, user_id=None):
+        guild_warns = self.settings["warns"].get(guild_id, {})
+        if user_id:
+            return guild_warns.get(str(user_id), [])
+        return guild_warns
+    
+    def add_warn(self, guild_id, user_id, warn_data):
+        if guild_id not in self.settings["warns"]:
+            self.settings["warns"][guild_id] = {}
+        
+        user_key = str(user_id)
+        if user_key not in self.settings["warns"][guild_id]:
+            self.settings["warns"][guild_id][user_key] = []
+        
+        self.settings["warns"][guild_id][user_key].append(warn_data)
+        self.save_settings()
+    
+    def get_mod_logs(self, guild_id):
+        return self.settings["mod_logs"].get(guild_id, [])
+    
+    def add_mod_log(self, guild_id, log_entry):
+        if guild_id not in self.settings["mod_logs"]:
+            self.settings["mod_logs"][guild_id] = []
+        
+        self.settings["mod_logs"][guild_id].append(log_entry)
+        
+        if len(self.settings["mod_logs"][guild_id]) > 1000:
+            self.settings["mod_logs"][guild_id] = self.settings["mod_logs"][guild_id][-1000:]
+        
+        self.save_settings()
+    
+    def save_embed_template(self, guild_id, name, template):
+        if str(guild_id) not in self.settings["embed_templates"]:
+            self.settings["embed_templates"][str(guild_id)] = {}
+        self.settings["embed_templates"][str(guild_id)][name] = template
+        self.save_settings()
+    
+    def get_embed_template(self, guild_id, name):
+        return self.settings["embed_templates"].get(str(guild_id), {}).get(name)
+    
+    def get_all_templates(self, guild_id):
+        return self.settings["embed_templates"].get(str(guild_id), {})
+    
+    def delete_embed_template(self, guild_id, name):
+        if str(guild_id) in self.settings["embed_templates"]:
+            if name in self.settings["embed_templates"][str(guild_id)]:
+                del self.settings["embed_templates"][str(guild_id)][name]
+                self.save_settings()
+                return True
+        return False
+
+data_manager = PersistentDataManager()
+
+# ==================== БОТ ====================
+
 class ModerationBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
-        self.initial_extensions = []
+        self.start_time = datetime.datetime.utcnow()
         
     async def setup_hook(self):
-        # Синхронизация слеш-команд
         await self.tree.sync()
         logger.info("✅ Слеш-команды синхронизированы")
         
     async def on_ready(self):
-        # Информационная панель при запуске
-        print("\n" + "="*50)
+        print("\n" + "="*60)
         print("🤖 МОДЕРАЦИОННЫЙ БОТ ЗАПУЩЕН")
-        print("="*50)
+        print("="*60)
         print(f"📱 Имя бота: {self.user.name}")
         print(f"🆔 ID бота: {self.user.id}")
         print(f"🌐 Серверов: {len(self.guilds)}")
-        print(f"👑 Главный администратор: {MAIN_ADMIN_ID}")
+        print(f"👑 Главные администраторы: {MAIN_ADMIN_IDS}")
         print(f"👨‍💻 Автор: by Ilya Vetrov")
         print(f"📅 Время запуска: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
-        print("="*50 + "\n")
+        print("="*60)
+        
+        total_log_channels = sum(len(channels) for channels in data_manager.settings["log_channels"].values())
+        total_join_roles = len(data_manager.settings["join_roles"])
+        
+        print(f"\n📊 Статистика настроек:")
+        print(f"   • Настроено каналов логов: {total_log_channels}")
+        print(f"   • Серверов с автовыдачей: {total_join_roles}")
+        print()
         
         await self.change_presence(activity=discord.Game(name="/help | Модерация by Ilya Vetrov"))
 
 bot = ModerationBot()
 
-# ЗАЩИЩЕННАЯ ПАПКА ДЛЯ ДАННЫХ
-DATA_DIR = '/app/data'
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# Файлы в защищенной папке
-JOIN_ROLES_FILE = os.path.join(DATA_DIR, 'join_roles.json')
-LOG_CHANNELS_FILE = os.path.join(DATA_DIR, 'log_channels.json')
-MOD_LOGS_FILE = os.path.join(DATA_DIR, 'mod_logs.json')
-WARNS_FILE = os.path.join(DATA_DIR, 'warns.json')
-
-# Дублируем в корень для совместимости
-LOCAL_JOIN_ROLES = 'join_roles.json'
-LOCAL_LOG_CHANNELS = 'log_channels.json'
-LOCAL_MOD_LOGS = 'mod_logs.json'
-LOCAL_WARNS = 'warns.json'
-
-# ==================== СИСТЕМА ХРАНЕНИЯ ДАННЫХ ====================
-
-class DataManager:
-    def __init__(self):
-        self.data_folder = DATA_DIR
-        self.ensure_data_folder()
-        
-    def ensure_data_folder(self):
-        if not os.path.exists(self.data_folder):
-            os.makedirs(self.data_folder)
-            logger.info(f"📁 Создана папка {self.data_folder}")
-    
-    def save_data(self, filename, local_filename, data):
-        try:
-            filepath = os.path.join(self.data_folder, filename)
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-            
-            with open(local_filename, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-                
-            logger.info(f"💾 Данные сохранены в {filename}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения {filename}: {e}")
-            return False
-    
-    def load_data(self, filename, local_filename, default=None):
-        filepath = os.path.join(self.data_folder, filename)
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"❌ Ошибка загрузки {filename}: {e}")
-        
-        if os.path.exists(local_filename):
-            try:
-                with open(local_filename, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                self.save_data(filename, local_filename, data)
-                return data
-            except Exception as e:
-                logger.error(f"❌ Ошибка загрузки {local_filename}: {e}")
-        
-        return default if default is not None else {}
-
-data_manager = DataManager()
-
-# ==================== КЛАССЫ ДЛЯ ХРАНЕНИЯ ДАННЫХ ====================
-
-class GuildSettings:
-    def __init__(self):
-        self.join_roles = {}
-        self.log_channels = {
-            "mod_actions": {},
-            "message_delete": {},
-            "message_edit": {},
-            "bulk_delete": {},
-            "role_give": {},
-            "warns": {},
-            "voice": {},
-            "nickname": {}
-        }
-        self.mod_logs = {}
-        self.warns = {}
-        
-    def load_all(self):
-        self.join_roles = data_manager.load_data('join_roles.json', LOCAL_JOIN_ROLES, {})
-        
-        loaded_channels = data_manager.load_data('log_channels.json', LOCAL_LOG_CHANNELS, {})
-        for key in self.log_channels.keys():
-            if key in loaded_channels:
-                self.log_channels[key] = {int(k) if k.isdigit() else k: v for k, v in loaded_channels[key].items()}
-        
-        self.mod_logs = data_manager.load_data('mod_logs.json', LOCAL_MOD_LOGS, {})
-        self.warns = data_manager.load_data('warns.json', LOCAL_WARNS, {})
-        
-        self.join_roles = {int(k) if isinstance(k, str) and k.isdigit() else k: v for k, v in self.join_roles.items()}
-        self.mod_logs = {int(k) if isinstance(k, str) and k.isdigit() else k: v for k, v in self.mod_logs.items()}
-        self.warns = {int(k) if isinstance(k, str) and k.isdigit() else k: v for k, v in self.warns.items()}
-        
-        logger.info(f"📂 Загружено: join_roles: {len(self.join_roles)}")
-        
-    def save_join_roles(self):
-        data_manager.save_data('join_roles.json', LOCAL_JOIN_ROLES, self.join_roles)
-        
-    def save_log_channels(self):
-        data_manager.save_data('log_channels.json', LOCAL_LOG_CHANNELS, self.log_channels)
-        
-    def save_mod_logs(self):
-        data_manager.save_data('mod_logs.json', LOCAL_MOD_LOGS, self.mod_logs)
-        
-    def save_warns(self):
-        data_manager.save_data('warns.json', LOCAL_WARNS, self.warns)
-
-settings = GuildSettings()
-
 # ==================== ПРОВЕРКА ПРАВ ====================
 
 def is_admin_only():
     async def predicate(interaction: discord.Interaction):
-        if interaction.user.id == MAIN_ADMIN_ID:
+        if interaction.user.id in MAIN_ADMIN_IDS:
             return True
         if interaction.user.guild_permissions.administrator:
             return True
         raise app_commands.errors.MissingPermissions(["administrator"])
     return app_commands.check(predicate)
 
-# ==================== ФУНКЦИИ ДЛЯ ОТПРАВКИ В РАЗНЫЕ КАНАЛЫ ====================
+def is_main_admin():
+    async def predicate(interaction: discord.Interaction):
+        if interaction.user.id in MAIN_ADMIN_IDS:
+            return True
+        raise app_commands.errors.MissingPermissions(["MAIN_ADMIN"])
+    return app_commands.check(predicate)
+
+# ==================== ФУНКЦИИ ДЛЯ ЛОГОВ ====================
 
 async def send_to_log_channel(guild, log_type, embed):
     if not guild:
         return
-    
-    guild_id = str(guild.id)
-    if guild_id in settings.log_channels.get(log_type, {}):
-        channel_id = settings.log_channels[log_type][guild_id]
-        channel = guild.get_channel(int(channel_id))
+    channel_id = data_manager.get_log_channel(guild.id, log_type)
+    if channel_id:
+        channel = guild.get_channel(channel_id)
         if channel:
             try:
                 await channel.send(embed=embed)
                 logger.info(f"📤 Отправлен лог в канал {channel.name} (тип: {log_type})")
             except Exception as e:
-                logger.error(f"Ошибка отправки в канал {log_type}: {e}")
-    else:
-        logger.info(f"[{log_type}] {embed.description if hasattr(embed, 'description') else embed.title}")
+                logger.error(f"Ошибка отправки: {e}")
 
 async def log_mod_action(guild, action_description, color=discord.Color.blue()):
-    embed = discord.Embed(
-        description=action_description,
-        color=color,
-        timestamp=datetime.datetime.utcnow()
-    )
+    embed = discord.Embed(description=action_description, color=color, timestamp=datetime.datetime.utcnow())
     embed.set_footer(text="by Ilya Vetrov • Модерация")
     await send_to_log_channel(guild, "mod_actions", embed)
 
 async def log_role_give(guild, action_description, color=discord.Color.green()):
-    embed = discord.Embed(
-        description=action_description,
-        color=color,
-        timestamp=datetime.datetime.utcnow()
-    )
+    embed = discord.Embed(description=action_description, color=color, timestamp=datetime.datetime.utcnow())
     embed.set_footer(text="by Ilya Vetrov • Изменение ролей")
     await send_to_log_channel(guild, "role_give", embed)
 
 async def log_warn(guild, action_description):
-    embed = discord.Embed(
-        description=action_description,
-        color=discord.Color.yellow(),
-        timestamp=datetime.datetime.utcnow()
-    )
+    embed = discord.Embed(description=action_description, color=discord.Color.yellow(), timestamp=datetime.datetime.utcnow())
     embed.set_footer(text="by Ilya Vetrov • Предупреждения")
     await send_to_log_channel(guild, "warns", embed)
 
 async def log_voice(guild, action_description, color=discord.Color.purple()):
-    embed = discord.Embed(
-        description=action_description,
-        color=color,
-        timestamp=datetime.datetime.utcnow()
-    )
+    embed = discord.Embed(description=action_description, color=color, timestamp=datetime.datetime.utcnow())
     embed.set_footer(text="by Ilya Vetrov • Голосовые каналы")
     await send_to_log_channel(guild, "voice", embed)
 
 async def log_nickname(guild, action_description):
-    embed = discord.Embed(
-        description=action_description,
-        color=discord.Color.teal(),
-        timestamp=datetime.datetime.utcnow()
-    )
+    embed = discord.Embed(description=action_description, color=discord.Color.teal(), timestamp=datetime.datetime.utcnow())
     embed.set_footer(text="by Ilya Vetrov • Смена ника")
     await send_to_log_channel(guild, "nickname", embed)
 
 async def log_message_delete(guild, message):
-    """Логирование удаленного сообщения"""
     if not guild:
         return
     
-    guild_id = str(guild.id)
-    if guild_id in settings.log_channels.get("message_delete", {}):
-        channel_id = settings.log_channels["message_delete"][guild_id]
-        channel = guild.get_channel(int(channel_id))
+    channel_id = data_manager.get_log_channel(guild.id, "message_delete")
+    if channel_id:
+        channel = guild.get_channel(channel_id)
         if channel:
-            embed = discord.Embed(
-                title="🗑 СООБЩЕНИЕ УДАЛЕНО",
-                color=discord.Color.red(),
-                timestamp=datetime.datetime.utcnow()
-            )
+            embed = discord.Embed(title="🗑 СООБЩЕНИЕ УДАЛЕНО", color=discord.Color.red(), timestamp=datetime.datetime.utcnow())
             
             author_text = f"{message.author.mention}\nID: `{message.author.id}`\nИмя: `{message.author.name}`"
             embed.add_field(name="👤 Автор", value=author_text, inline=True)
@@ -268,123 +317,21 @@ async def log_message_delete(guild, message):
             channel_text = f"{message.channel.mention}\nID: `{message.channel.id}`"
             embed.add_field(name="📌 Канал", value=channel_text, inline=True)
             
-            if message.created_at:
-                time_text = message.created_at.strftime("%d.%m.%Y %H:%M:%S")
-                embed.add_field(name="⏰ Отправлено", value=f"`{time_text}`", inline=True)
-            
             if message.content:
                 content = message.content[:1000] + "..." if len(message.content) > 1000 else message.content
                 embed.add_field(name="📝 Содержание", value=f"```{content}```", inline=False)
-            else:
-                embed.add_field(name="📝 Содержание", value="`[Пустое сообщение]`", inline=False)
             
-            if message.attachments:
-                attachments_list = []
-                for i, att in enumerate(message.attachments, 1):
-                    attachments_list.append(f"{i}. [{att.filename}]({att.url}) ({(att.size/1024):.1f} KB)")
-                attachments_text = "\n".join(attachments_list)
-                embed.add_field(name="📎 Вложения", value=attachments_text[:1000], inline=False)
-            
-            if message.mentions:
-                mentions_list = [f"{m.mention} (`{m.id}`)" for m in message.mentions[:5]]
-                mentions_text = ", ".join(mentions_list)
-                if len(message.mentions) > 5:
-                    mentions_text += f" и ещё {len(message.mentions)-5}"
-                embed.add_field(name="👥 Упоминания", value=mentions_text[:500], inline=False)
-            
-            embed.set_footer(text=f"by Ilya Vetrov • ID сообщения: {message.id}")
+            embed.set_footer(text=f"by Ilya Vetrov • ID: {message.id}")
             await channel.send(embed=embed)
 
-# ==================== ФУНКЦИЯ ПОЛУЧЕНИЯ ИНФОРМАЦИИ О ВЫДАТЧИКЕ РОЛИ ====================
+# ==================== КОМАНДЫ ДЛЯ НАСТРОЙКИ ЛОГОВ ====================
 
-async def get_role_moderator(guild, target, role, action_type):
-    """
-    Получает информацию о том, кто выдал/снял роль из аудит-лога
-    action_type: "add" для выдачи, "remove" для снятия
-    Возвращает строку с информацией о модераторе
-    """
-    try:
-        # Определяем тип действия для аудит-лога
-        if action_type == "add":
-            action = discord.AuditLogAction.member_role_update
-        else:
-            action = discord.AuditLogAction.member_role_update
-        
-        # Ждем немного, чтобы аудит-лог успел обновиться
-        await asyncio.sleep(0.5)
-        
-        # Ищем в аудит-логе последние 10 записей
-        async for entry in guild.audit_logs(limit=10, action=action):
-            if entry.target.id == target.id:
-                # Проверяем, была ли изменена именно эта роль
-                if action_type == "add" and role in entry.after.roles and role not in entry.before.roles:
-                    moderator = entry.user
-                    return f"**Выдал:** {moderator.mention} (`{moderator.id}`)"
-                elif action_type == "remove" and role in entry.before.roles and role not in entry.after.roles:
-                    moderator = entry.user
-                    return f"**Снял:** {moderator.mention} (`{moderator.id}`)"
-        
-        # Если не нашли в аудит-логе, возможно, роль выдал бот или система
-        return f"**Инициатор:** `Система/Бот (не удалось определить)`"
-        
-    except discord.Forbidden:
-        logger.warning(f"⚠️ Нет прав на просмотр аудит-лога на сервере {guild.name}")
-        return f"**Инициатор:** `Не удалось определить (нет прав на аудит-лог)`"
-    except Exception as e:
-        logger.error(f"❌ Ошибка при получении аудит-лога: {e}")
-        return f"**Инициатор:** `Не удалось определить ({str(e)})`"
-
-# ==================== КОМАНДА ДЛЯ ТЕСТА ЛОГОВ РОЛЕЙ ====================
-
-@bot.tree.command(name="test_role_log", description="Протестировать логирование ролей (выдать тестовую роль)")
-@is_admin_only()
-async def slash_test_role_log(interaction: discord.Interaction):
-    """Тестовая команда для проверки логирования ролей"""
-    await interaction.response.defer(ephemeral=True)
-    
-    # Проверяем настроен ли канал для логов ролей
-    guild_id = str(interaction.guild_id)
-    if guild_id in settings.log_channels.get("role_give", {}):
-        channel_id = settings.log_channels["role_give"][guild_id]
-        channel = interaction.guild.get_channel(int(channel_id))
-        if channel:
-            # Отправляем тестовый лог
-            test_embed = discord.Embed(
-                title="🧪 ТЕСТ ЛОГИРОВАНИЯ РОЛЕЙ",
-                description=f"Это тестовое сообщение для проверки канала логов ролей.\n\n"
-                            f"**Канал:** {channel.mention}\n"
-                            f"**ID канала:** `{channel.id}`\n\n"
-                            f"Если вы видите это сообщение, то канал настроен правильно!\n\n"
-                            f"**Формат логов ролей:**\n"
-                            f"• Кто выдал/снял роль\n"
-                            f"• Кому выдал/снял роль\n"
-                            f"• Какую роль\n"
-                            f"• Время действия",
-                color=discord.Color.blue(),
-                timestamp=datetime.datetime.utcnow()
-            )
-            test_embed.set_footer(text="by Ilya Vetrov • Тест логов ролей")
-            await channel.send(embed=test_embed)
-            
-            await interaction.followup.send(f"✅ Тестовое сообщение отправлено в канал {channel.mention}", ephemeral=True)
-        else:
-            await interaction.followup.send(f"❌ Канал с ID `{channel_id}` не найден!", ephemeral=True)
-    else:
-        await interaction.followup.send("❌ Канал для логов ролей не настроен! Используйте `/set_role_give_channel #канал`", ephemeral=True)
-
-# ==================== КОМАНДА ДЛЯ БЫСТРОЙ НАСТРОЙКИ ВСЕХ КАНАЛОВ ====================
-
-@bot.tree.command(name="setup_all_logs", description="Быстрая настройка всех каналов для логов (укажите канал)")
+@bot.tree.command(name="setup_all_logs", description="Быстрая настройка всех каналов для логов")
 @app_commands.describe(channel="Канал для всех логов")
 @is_admin_only()
-async def slash_setup_all_logs(interaction: discord.Interaction, channel: discord.TextChannel):
-    """Устанавливает один канал для всех типов логов"""
-    guild_id = str(interaction.guild_id)
-    
-    for log_type in settings.log_channels.keys():
-        settings.log_channels[log_type][guild_id] = channel.id
-    
-    settings.save_log_channels()
+async def setup_all_logs(interaction: discord.Interaction, channel: discord.TextChannel):
+    for log_type in data_manager.settings["log_channels"].keys():
+        data_manager.set_log_channel(interaction.guild_id, log_type, channel.id)
     
     embed = discord.Embed(
         title="✅ ВСЕ КАНАЛЫ ЛОГОВ НАСТРОЕНЫ",
@@ -394,160 +341,71 @@ async def slash_setup_all_logs(interaction: discord.Interaction, channel: discor
                     f"• 🗑️ Удаленные сообщения\n"
                     f"• ✏️ Измененные сообщения\n"
                     f"• 📦 Массовые удаления\n"
-                    f"• 👥 Выдача/снятие ролей (с указанием кто выдал)\n"
+                    f"• 👥 Выдача/снятие ролей\n"
                     f"• ⚠️ Предупреждения\n"
                     f"• 🔊 Голосовые каналы\n"
                     f"• 📝 Смена никнеймов",
         color=discord.Color.green()
     )
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
     await interaction.response.send_message(embed=embed)
-
-# ==================== СЛЕШ-КОМАНДЫ ДЛЯ НАСТРОЙКИ КАНАЛОВ ====================
 
 @bot.tree.command(name="set_mod_log_channel", description="Установить канал для логов действий модерации")
 @app_commands.describe(channel="Канал для логирования")
 @is_admin_only()
-async def slash_set_mod_log_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    settings.log_channels["mod_actions"][str(interaction.guild_id)] = channel.id
-    settings.save_log_channels()
-    
-    embed = discord.Embed(
-        title="✅ Канал для модерации установлен",
-        description=f"Действия модерации будут логироваться в {channel.mention}",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
+async def set_mod_log_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    data_manager.set_log_channel(interaction.guild_id, "mod_actions", channel.id)
+    embed = discord.Embed(title="✅ Канал установлен", description=f"Логи модерации в {channel.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="set_message_delete_channel", description="Установить канал для логов удаленных сообщений")
 @app_commands.describe(channel="Канал для логирования")
 @is_admin_only()
-async def slash_set_message_delete_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    settings.log_channels["message_delete"][str(interaction.guild_id)] = channel.id
-    settings.save_log_channels()
-    
-    embed = discord.Embed(
-        title="✅ Канал для удаленных сообщений установлен",
-        description=f"Удаленные сообщения будут логироваться в {channel.mention}",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="set_message_edit_channel", description="Установить канал для логов измененных сообщений")
-@app_commands.describe(channel="Канал для логирования")
-@is_admin_only()
-async def slash_set_message_edit_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    settings.log_channels["message_edit"][str(interaction.guild_id)] = channel.id
-    settings.save_log_channels()
-    
-    embed = discord.Embed(
-        title="✅ Канал для измененных сообщений установлен",
-        description=f"Измененные сообщения будут логироваться в {channel.mention}",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="set_bulk_delete_channel", description="Установить канал для логов массовых удалений")
-@app_commands.describe(channel="Канал для логирования")
-@is_admin_only()
-async def slash_set_bulk_delete_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    settings.log_channels["bulk_delete"][str(interaction.guild_id)] = channel.id
-    settings.save_log_channels()
-    
-    embed = discord.Embed(
-        title="✅ Канал для массовых удалений установлен",
-        description=f"Массовые удаления будут логироваться в {channel.mention}\n\n"
-                    f"⚠️ **Важно:** Каждое удаленное сообщение будет показано отдельно!",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
+async def set_message_delete_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    data_manager.set_log_channel(interaction.guild_id, "message_delete", channel.id)
+    embed = discord.Embed(title="✅ Канал установлен", description=f"Логи удаленных сообщений в {channel.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="set_role_give_channel", description="Установить канал для логов выдачи/снятия ролей")
 @app_commands.describe(channel="Канал для логирования")
 @is_admin_only()
-async def slash_set_role_give_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    settings.log_channels["role_give"][str(interaction.guild_id)] = channel.id
-    settings.save_log_channels()
-    
-    embed = discord.Embed(
-        title="✅ Канал для изменений ролей установлен",
-        description=f"Выдача и снятие ролей будут логироваться в {channel.mention}\n\n"
-                    f"⚠️ **Важно:** Убедитесь, что бот имеет право **«Просматривать аудит логов»** (View Audit Log) на сервере!\n\n"
-                    f"📝 **Формат логов:**\n"
-                    f"• Кто выдал/снял роль\n"
-                    f"• Кому выдал/снял роль\n"
-                    f"• Какая роль",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
+async def set_role_give_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    data_manager.set_log_channel(interaction.guild_id, "role_give", channel.id)
+    embed = discord.Embed(title="✅ Канал установлен", description=f"Логи изменения ролей в {channel.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="set_warns_channel", description="Установить канал для логов предупреждений")
 @app_commands.describe(channel="Канал для логирования")
 @is_admin_only()
-async def slash_set_warns_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    settings.log_channels["warns"][str(interaction.guild_id)] = channel.id
-    settings.save_log_channels()
-    
-    embed = discord.Embed(
-        title="✅ Канал для предупреждений установлен",
-        description=f"Предупреждения будут логироваться в {channel.mention}",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
+async def set_warns_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    data_manager.set_log_channel(interaction.guild_id, "warns", channel.id)
+    embed = discord.Embed(title="✅ Канал установлен", description=f"Логи предупреждений в {channel.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="set_voice_channel", description="Установить канал для логов голосовых каналов")
 @app_commands.describe(channel="Канал для логирования")
 @is_admin_only()
-async def slash_set_voice_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    settings.log_channels["voice"][str(interaction.guild_id)] = channel.id
-    settings.save_log_channels()
-    
-    embed = discord.Embed(
-        title="✅ Канал для голосовых каналов установлен",
-        description=f"Входы/выходы из войс-каналов будут логироваться в {channel.mention}",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
+async def set_voice_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    data_manager.set_log_channel(interaction.guild_id, "voice", channel.id)
+    embed = discord.Embed(title="✅ Канал установлен", description=f"Логи голосовых каналов в {channel.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="set_nickname_channel", description="Установить канал для логов смены никнеймов")
 @app_commands.describe(channel="Канал для логирования")
 @is_admin_only()
-async def slash_set_nickname_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    settings.log_channels["nickname"][str(interaction.guild_id)] = channel.id
-    settings.save_log_channels()
-    
-    embed = discord.Embed(
-        title="✅ Канал для смены никнеймов установлен",
-        description=f"Смена никнеймов будет логироваться в {channel.mention}",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
+async def set_nickname_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    data_manager.set_log_channel(interaction.guild_id, "nickname", channel.id)
+    embed = discord.Embed(title="✅ Канал установлен", description=f"Логи смены никнеймов в {channel.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="show_log_channels", description="Показать настроенные каналы для логов")
 @is_admin_only()
-async def slash_show_log_channels(interaction: discord.Interaction):
-    guild_id = str(interaction.guild_id)
-    
-    embed = discord.Embed(
-        title="📋 Настроенные каналы логирования",
-        color=discord.Color.blue(),
-        timestamp=datetime.datetime.utcnow()
-    )
+async def show_log_channels(interaction: discord.Interaction):
+    embed = discord.Embed(title="📋 Настроенные каналы логирования", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
     
     channel_types = {
         "mod_actions": "🛡️ Действия модерации",
         "message_delete": "🗑️ Удаленные сообщения",
-        "message_edit": "✏️ Измененные сообщения",
-        "bulk_delete": "📦 Массовые удаления",
-        "role_give": "👥 Изменение ролей (с указанием кто выдал)",
+        "role_give": "👥 Изменение ролей",
         "warns": "⚠️ Предупреждения",
         "voice": "🔊 Голосовые каналы",
         "nickname": "📝 Смена никнеймов"
@@ -555,9 +413,9 @@ async def slash_show_log_channels(interaction: discord.Interaction):
     
     configured = 0
     for key, name in channel_types.items():
-        if guild_id in settings.log_channels.get(key, {}):
-            channel_id = settings.log_channels[key][guild_id]
-            channel = interaction.guild.get_channel(int(channel_id))
+        channel_id = data_manager.get_log_channel(interaction.guild_id, key)
+        if channel_id:
+            channel = interaction.guild.get_channel(channel_id)
             if channel:
                 embed.add_field(name=name, value=channel.mention, inline=False)
                 configured += 1
@@ -567,200 +425,116 @@ async def slash_show_log_channels(interaction: discord.Interaction):
             embed.add_field(name=name, value="❌ Не настроен", inline=False)
     
     embed.add_field(name="📊 Статистика", value=f"Настроено {configured} из {len(channel_types)} каналов", inline=False)
-    embed.set_footer(text="by Ilya Vetrov • Настройка логов")
     await interaction.response.send_message(embed=embed)
 
-# ==================== СЛЕШ-КОМАНДЫ ДЛЯ РОЛЕЙ ====================
+# ==================== КОМАНДЫ ДЛЯ РОЛЕЙ ====================
 
 @bot.tree.command(name="set_join_role", description="Установить роль для новых участников")
 @app_commands.describe(role="Роль, которая будет выдаваться новым участникам")
 @is_admin_only()
-async def slash_set_join_role(interaction: discord.Interaction, role: discord.Role):
-    settings.join_roles[str(interaction.guild_id)] = role.id
-    settings.save_join_roles()
-    
-    embed = discord.Embed(
-        title="✅ Роль установлена",
-        description=f"Новые участники теперь будут получать роль {role.mention}",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
+async def set_join_role(interaction: discord.Interaction, role: discord.Role):
+    data_manager.set_join_role(interaction.guild_id, role.id)
+    embed = discord.Embed(title="✅ Роль установлена", description=f"Новые участники будут получать роль {role.mention}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed)
-    await log_role_give(interaction.guild, f"⚙️ **Выдал:** {interaction.user.mention} (`{interaction.user.id}`)\n**Пользователь:** Система\n**Действие:** Установил автоматическую выдачу роли {role.mention} для новичков", discord.Color.blue())
 
 @bot.tree.command(name="remove_join_role", description="Отключить автоматическую выдачу роли")
 @is_admin_only()
-async def slash_remove_join_role(interaction: discord.Interaction):
-    if str(interaction.guild_id) in settings.join_roles:
-        del settings.join_roles[str(interaction.guild_id)]
-        settings.save_join_roles()
-        
-        embed = discord.Embed(
-            title="✅ Автовыдача отключена",
-            description="Новые участники больше не будут получать роль автоматически",
-            color=discord.Color.green()
-        )
-        embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
+async def remove_join_role(interaction: discord.Interaction):
+    if data_manager.remove_join_role(interaction.guild_id):
+        embed = discord.Embed(title="✅ Автовыдача отключена", description="Новые участники больше не будут получать роль автоматически", color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
-        await log_role_give(interaction.guild, f"⚙️ **Выдал:** {interaction.user.mention} (`{interaction.user.id}`)\n**Пользователь:** Система\n**Действие:** Отключил автовыдачу роли", discord.Color.blue())
     else:
         await interaction.response.send_message("❌ Автовыдача роли не была настроена", ephemeral=True)
 
-# ==================== СЛЕШ-КОМАНДЫ МОДЕРАЦИИ ====================
+# ==================== КОМАНДЫ МОДЕРАЦИИ ====================
 
 @bot.tree.command(name="kick", description="Кикнуть пользователя")
 @app_commands.describe(member="Пользователь для кика", reason="Причина кика")
 @is_admin_only()
-async def slash_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
+async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
     try:
         await member.kick(reason=reason)
-        
-        embed = discord.Embed(
-            title="👢 Пользователь кикнут",
-            description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Причина:** {reason}",
-            color=discord.Color.orange(),
-            timestamp=datetime.datetime.utcnow()
-        )
-        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
+        embed = discord.Embed(title="👢 Пользователь кикнут", description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Причина:** {reason}", color=discord.Color.orange())
         await interaction.response.send_message(embed=embed)
-        
-        await log_mod_action(interaction.guild, f"👢 {interaction.user.mention} (`{interaction.user.id}`) кикнул {member.mention} (`{member.id}`)\nПричина: {reason}")
-        await save_mod_log(interaction.guild, "kick", interaction.user, member, reason)
+        await log_mod_action(interaction.guild, f"👢 {interaction.user.mention} кикнул {member.mention}\nПричина: {reason}")
+        data_manager.add_mod_log(interaction.guild_id, {"action": "kick", "moderator": interaction.user.id, "target": member.id, "reason": reason, "date": datetime.datetime.utcnow().isoformat()})
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
 
 @bot.tree.command(name="ban", description="Забанить пользователя")
 @app_commands.describe(member="Пользователь для бана", reason="Причина бана")
 @is_admin_only()
-async def slash_ban(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
+async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
     try:
         await member.ban(reason=reason, delete_message_days=0)
-        
-        embed = discord.Embed(
-            title="🔨 Пользователь забанен",
-            description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Причина:** {reason}",
-            color=discord.Color.red(),
-            timestamp=datetime.datetime.utcnow()
-        )
-        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
+        embed = discord.Embed(title="🔨 Пользователь забанен", description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Причина:** {reason}", color=discord.Color.red())
         await interaction.response.send_message(embed=embed)
-        
-        await log_mod_action(interaction.guild, f"🔨 {interaction.user.mention} (`{interaction.user.id}`) забанил {member.mention} (`{member.id}`)\nПричина: {reason}")
-        await save_mod_log(interaction.guild, "ban", interaction.user, member, reason)
+        await log_mod_action(interaction.guild, f"🔨 {interaction.user.mention} забанил {member.mention}\nПричина: {reason}")
+        data_manager.add_mod_log(interaction.guild_id, {"action": "ban", "moderator": interaction.user.id, "target": member.id, "reason": reason, "date": datetime.datetime.utcnow().isoformat()})
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
 
 @bot.tree.command(name="unban", description="Разбанить пользователя по ID")
 @app_commands.describe(user_id="ID пользователя", reason="Причина разбана")
 @is_admin_only()
-async def slash_unban(interaction: discord.Interaction, user_id: str, reason: str = "Не указана"):
+async def unban(interaction: discord.Interaction, user_id: str, reason: str = "Не указана"):
     try:
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user, reason=reason)
-        
-        embed = discord.Embed(
-            title="🔓 Пользователь разбанен",
-            description=f"**Пользователь:** {user.name}\n**ID:** `{user.id}`\n**Причина:** {reason}",
-            color=discord.Color.green(),
-            timestamp=datetime.datetime.utcnow()
-        )
-        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
+        embed = discord.Embed(title="🔓 Пользователь разбанен", description=f"**Пользователь:** {user.name}\n**ID:** `{user.id}`\n**Причина:** {reason}", color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
-        
-        await log_mod_action(interaction.guild, f"🔓 {interaction.user.mention} (`{interaction.user.id}`) разбанил {user.name} (`{user.id}`)\nПричина: {reason}")
+        await log_mod_action(interaction.guild, f"🔓 {interaction.user.mention} разбанил {user.name}\nПричина: {reason}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
 
 @bot.tree.command(name="mute", description="Замутить пользователя")
 @app_commands.describe(member="Пользователь для мута", minutes="Длительность в минутах", reason="Причина мута")
 @is_admin_only()
-async def slash_mute(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "Не указана"):
+async def mute(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "Не указана"):
     try:
         duration = datetime.timedelta(minutes=minutes)
         await member.timeout(duration, reason=reason)
-        
-        embed = discord.Embed(
-            title="🔇 Пользователь замучен",
-            description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Длительность:** {minutes} мин\n**Причина:** {reason}",
-            color=discord.Color.dark_gray(),
-            timestamp=datetime.datetime.utcnow()
-        )
-        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
+        embed = discord.Embed(title="🔇 Пользователь замучен", description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Длительность:** {minutes} мин\n**Причина:** {reason}", color=discord.Color.dark_gray())
         await interaction.response.send_message(embed=embed)
-        
-        await log_mod_action(interaction.guild, f"🔇 {interaction.user.mention} (`{interaction.user.id}`) замутил {member.mention} (`{member.id}`) на {minutes} мин\nПричина: {reason}")
-        await save_mod_log(interaction.guild, "mute", interaction.user, member, reason, minutes)
+        await log_mod_action(interaction.guild, f"🔇 {interaction.user.mention} замутил {member.mention} на {minutes} мин\nПричина: {reason}")
+        data_manager.add_mod_log(interaction.guild_id, {"action": "mute", "moderator": interaction.user.id, "target": member.id, "reason": reason, "duration": minutes, "date": datetime.datetime.utcnow().isoformat()})
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
 
 @bot.tree.command(name="unmute", description="Снять мут с пользователя")
 @app_commands.describe(member="Пользователь для снятия мута", reason="Причина")
 @is_admin_only()
-async def slash_unmute(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
+async def unmute(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
     try:
         await member.timeout(None, reason=reason)
-        
-        embed = discord.Embed(
-            title="🔊 Мут снят",
-            description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Причина:** {reason}",
-            color=discord.Color.green(),
-            timestamp=datetime.datetime.utcnow()
-        )
-        embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
+        embed = discord.Embed(title="🔊 Мут снят", description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Причина:** {reason}", color=discord.Color.green())
         await interaction.response.send_message(embed=embed)
-        
-        await log_mod_action(interaction.guild, f"🔊 {interaction.user.mention} (`{interaction.user.id}`) снял мут с {member.mention} (`{member.id}`)\nПричина: {reason}")
+        await log_mod_action(interaction.guild, f"🔊 {interaction.user.mention} снял мут с {member.mention}\nПричина: {reason}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
 
 @bot.tree.command(name="clear", description="Очистить сообщения в канале")
 @app_commands.describe(amount="Количество сообщений для удаления")
 @is_admin_only()
-async def slash_clear(interaction: discord.Interaction, amount: int):
+async def clear(interaction: discord.Interaction, amount: int):
     try:
         await interaction.response.defer(ephemeral=True)
         deleted = await interaction.channel.purge(limit=amount)
-        
-        embed = discord.Embed(
-            title="🧹 Сообщения удалены",
-            description=f"Удалено **{len(deleted)}** сообщений",
-            color=discord.Color.blue()
-        )
-        embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
+        embed = discord.Embed(title="🧹 Сообщения удалены", description=f"Удалено **{len(deleted)}** сообщений", color=discord.Color.blue())
         await interaction.followup.send(embed=embed, ephemeral=True)
-        
-        await log_mod_action(interaction.guild, f"🧹 {interaction.user.mention} (`{interaction.user.id}`) очистил {len(deleted)} сообщений в {interaction.channel.mention}")
+        await log_mod_action(interaction.guild, f"🧹 {interaction.user.mention} очистил {len(deleted)} сообщений в {interaction.channel.mention}")
     except Exception as e:
         await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
 
 @bot.tree.command(name="warn", description="Выдать предупреждение пользователю")
 @app_commands.describe(member="Пользователь", reason="Причина предупреждения")
 @is_admin_only()
-async def slash_warn(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
-    guild_id = str(interaction.guild_id)
+async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
+    warn_data = {"moderator": interaction.user.id, "reason": reason, "date": datetime.datetime.utcnow().isoformat()}
+    data_manager.add_warn(interaction.guild_id, member.id, warn_data)
+    warns_count = len(data_manager.get_warns(interaction.guild_id, member.id))
     
-    if guild_id not in settings.warns:
-        settings.warns[guild_id] = {}
-    
-    user_id = str(member.id)
-    if user_id not in settings.warns[guild_id]:
-        settings.warns[guild_id][user_id] = []
-    
-    warn_data = {
-        "moderator": interaction.user.id,
-        "reason": reason,
-        "date": datetime.datetime.utcnow().isoformat()
-    }
-    settings.warns[guild_id][user_id].append(warn_data)
-    settings.save_warns()
-    
-    embed = discord.Embed(
-        title="⚠️ Предупреждение",
-        description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Предупреждений:** {len(settings.warns[guild_id][user_id])}\n**Причина:** {reason}",
-        color=discord.Color.yellow(),
-        timestamp=datetime.datetime.utcnow()
-    )
-    embed.set_footer(text=f"Модератор: {interaction.user} (`{interaction.user.id}`) • by Ilya Vetrov")
+    embed = discord.Embed(title="⚠️ Предупреждение", description=f"**Пользователь:** {member.mention}\n**ID:** `{member.id}`\n**Предупреждений:** {warns_count}\n**Причина:** {reason}", color=discord.Color.yellow())
     await interaction.response.send_message(embed=embed)
     
     try:
@@ -768,34 +542,21 @@ async def slash_warn(interaction: discord.Interaction, member: discord.Member, r
     except:
         pass
     
-    await log_warn(interaction.guild, f"⚠️ {interaction.user.mention} (`{interaction.user.id}`) выдал предупреждение {member.mention} (`{member.id}`)\nПричина: {reason}")
+    await log_warn(interaction.guild, f"⚠️ {interaction.user.mention} выдал предупреждение {member.mention}\nПричина: {reason}")
 
 @bot.tree.command(name="warns", description="Показать предупреждения пользователя")
 @app_commands.describe(member="Пользователь")
 @is_admin_only()
-async def slash_warns(interaction: discord.Interaction, member: discord.Member):
-    guild_id = str(interaction.guild_id)
+async def warns(interaction: discord.Interaction, member: discord.Member):
+    warns_list = data_manager.get_warns(interaction.guild_id, member.id)
     
-    if guild_id in settings.warns and str(member.id) in settings.warns[guild_id]:
-        warns = settings.warns[guild_id][str(member.id)]
-        
-        embed = discord.Embed(
-            title=f"Предупреждения: {member.display_name}",
-            description=f"**ID:** `{member.id}`",
-            color=discord.Color.orange()
-        )
-        embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
-        
-        for i, warn in enumerate(warns[-10:], 1):
+    if warns_list:
+        embed = discord.Embed(title=f"Предупреждения: {member.display_name}", description=f"**ID:** `{member.id}`\n**Всего:** {len(warns_list)}", color=discord.Color.orange())
+        for i, warn in enumerate(warns_list[-10:], 1):
             mod = bot.get_user(warn["moderator"])
             mod_name = mod.name if mod else f"ID: {warn['moderator']}"
             date = datetime.datetime.fromisoformat(warn["date"]).strftime("%d.%m.%Y %H:%M")
-            embed.add_field(
-                name=f"#{i} - {date}",
-                value=f"**Модератор:** {mod_name} (`{warn['moderator']}`)\n**Причина:** {warn['reason']}",
-                inline=False
-            )
-        
+            embed.add_field(name=f"#{i} - {date}", value=f"**Модератор:** {mod_name}\n**Причина:** {warn['reason']}", inline=False)
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(f"У пользователя {member.mention} нет предупреждений", ephemeral=True)
@@ -803,118 +564,284 @@ async def slash_warns(interaction: discord.Interaction, member: discord.Member):
 @bot.tree.command(name="mod_logs", description="Показать последние действия модерации")
 @app_commands.describe(limit="Количество записей для показа")
 @is_admin_only()
-async def slash_mod_logs(interaction: discord.Interaction, limit: int = 10):
-    guild_id = str(interaction.guild_id)
+async def mod_logs(interaction: discord.Interaction, limit: int = 10):
+    logs = data_manager.get_mod_logs(interaction.guild_id)
     
-    if guild_id in settings.mod_logs:
-        logs = settings.mod_logs[guild_id][-limit:]
+    if logs:
+        logs_to_show = logs[-limit:]
+        embed = discord.Embed(title="📋 Последние действия модерации", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
         
-        embed = discord.Embed(
-            title="📋 Последние действия модерации",
-            color=discord.Color.blue(),
-            timestamp=datetime.datetime.utcnow()
-        )
-        embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
-        
-        for log in reversed(logs):
+        for log in reversed(logs_to_show):
             date = datetime.datetime.fromisoformat(log["date"]).strftime("%d.%m.%Y %H:%M")
-            embed.add_field(
-                name=f"{log['action']} - {date}",
-                value=f"**Модератор:** <@{log['moderator']}> (`{log['moderator']}`)\n**Пользователь:** <@{log['target']}> (`{log['target']}`)\n**Причина:** {log['reason']}",
-                inline=False
-            )
+            duration_text = f" на {log['duration']} мин" if "duration" in log else ""
+            embed.add_field(name=f"{log['action']}{duration_text} - {date}", value=f"**Модератор:** <@{log['moderator']}>\n**Пользователь:** <@{log['target']}>\n**Причина:** {log['reason']}", inline=False)
         
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message("Логи пока отсутствуют", ephemeral=True)
 
-@bot.tree.command(name="help", description="Показать список команд")
-async def slash_help(interaction: discord.Interaction):
+# ==================== КОМАНДЫ ДЛЯ КРАСИВЫХ СООБЩЕНИЙ ====================
+
+@bot.tree.command(name="embed", description="Создать красивое сообщение в любой канал")
+@app_commands.describe(
+    channel="Канал для отправки",
+    title="Заголовок сообщения",
+    description="Основной текст сообщения",
+    color="Цвет (red, green, blue, gold, purple, orange, yellow, pink)",
+    thumbnail="URL миниатюры (опционально)",
+    image="URL большого изображения (опционально)",
+    footer="Текст внизу (опционально)",
+    timestamp="Добавить время (True/False)"
+)
+@is_main_admin()
+async def slash_embed(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    title: str,
+    description: str,
+    color: str = "blue",
+    thumbnail: Optional[str] = None,
+    image: Optional[str] = None,
+    footer: Optional[str] = None,
+    timestamp: bool = False
+):
+    color_map = {
+        "red": discord.Color.red(),
+        "green": discord.Color.green(),
+        "blue": discord.Color.blue(),
+        "gold": discord.Color.gold(),
+        "purple": discord.Color.purple(),
+        "orange": discord.Color.orange(),
+        "yellow": discord.Color.yellow(),
+        "pink": discord.Color.magenta(),
+    }
+    
+    embed_color = color_map.get(color.lower(), discord.Color.blue())
+    
+    embed = discord.Embed(title=title, description=description, color=embed_color)
+    
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+    if image:
+        embed.set_image(url=image)
+    if footer:
+        embed.set_footer(text=footer)
+    if timestamp:
+        embed.timestamp = datetime.datetime.utcnow()
+    
+    await channel.send(embed=embed)
+    await interaction.response.send_message(f"✅ Сообщение отправлено в {channel.mention}", ephemeral=True)
+
+
+@bot.tree.command(name="embed_fields", description="Создать сообщение с несколькими полями")
+@app_commands.describe(
+    channel="Канал для отправки",
+    title="Заголовок сообщения",
+    fields="Поля в формате: Название1 | Текст1 || Название2 | Текст2",
+    color="Цвет (red, green, blue, gold, purple, orange)",
+    thumbnail="URL миниатюры (опционально)",
+    image="URL изображения (опционально)",
+    footer="Текст внизу (опционально)"
+)
+@is_main_admin()
+async def slash_embed_fields(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    title: str,
+    fields: str,
+    color: str = "blue",
+    thumbnail: Optional[str] = None,
+    image: Optional[str] = None,
+    footer: Optional[str] = None
+):
+    color_map = {
+        "red": discord.Color.red(),
+        "green": discord.Color.green(),
+        "blue": discord.Color.blue(),
+        "gold": discord.Color.gold(),
+        "purple": discord.Color.purple(),
+        "orange": discord.Color.orange(),
+    }
+    embed_color = color_map.get(color.lower(), discord.Color.blue())
+    
+    embed = discord.Embed(title=title, color=embed_color, timestamp=datetime.datetime.utcnow())
+    
+    field_parts = fields.split("||")
+    
+    for field in field_parts:
+        if "|" in field:
+            name, value = field.split("|", 1)
+            embed.add_field(name=name.strip(), value=value.strip(), inline=False)
+    
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+    if image:
+        embed.set_image(url=image)
+    if footer:
+        embed.set_footer(text=footer)
+    
+    await channel.send(embed=embed)
+    await interaction.response.send_message(f"✅ Сообщение с {len(field_parts)} полями отправлено в {channel.mention}", ephemeral=True)
+
+
+@bot.tree.command(name="say", description="Быстро отправить красивое сообщение")
+@app_commands.describe(
+    channel="Канал для отправки",
+    text="Текст сообщения",
+    color="Цвет (red, green, blue, gold)",
+    title="Заголовок (опционально)"
+)
+@is_main_admin()
+async def slash_say(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    text: str,
+    color: str = "blue",
+    title: Optional[str] = None
+):
+    color_map = {
+        "red": discord.Color.red(),
+        "green": discord.Color.green(),
+        "blue": discord.Color.blue(),
+        "gold": discord.Color.gold(),
+    }
+    embed_color = color_map.get(color.lower(), discord.Color.blue())
+    
     embed = discord.Embed(
-        title="📚 Команды модерационного бота",
-        description="**Автор: by Ilya Vetrov**\nГлавный администратор имеет абсолютные права на всех серверах.\n\n**Все команды доступны только администраторам сервера!**",
-        color=discord.Color.blue()
+        title=title if title else None,
+        description=text,
+        color=embed_color
     )
     
-    embed.add_field(
-        name="⚙️ Настройка ролей",
-        value="`/set_join_role` - установить роль для новичков\n`/remove_join_role` - отключить автовыдачу",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="📋 Настройка каналов для логов",
-        value="`/setup_all_logs` - **БЫСТРАЯ НАСТРОЙКА** (все логи в один канал)\n"
-              "`/set_mod_log_channel` - канал для действий модерации\n"
-              "`/set_message_delete_channel` - удаленные сообщения\n"
-              "`/set_message_edit_channel` - измененные сообщения\n"
-              "`/set_bulk_delete_channel` - массовые удаления\n"
-              "`/set_role_give_channel` - выдача/снятие ролей (с указанием кто выдал)\n"
-              "`/set_warns_channel` - предупреждения\n"
-              "`/set_voice_channel` - голосовые каналы\n"
-              "`/set_nickname_channel` - смена никнеймов\n"
-              "`/show_log_channels` - показать настройки",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🛡️ Модерация",
-        value="`/kick` - кикнуть пользователя\n`/ban` - забанить пользователя\n`/unban` - разбанить по ID\n`/mute` - замутить на время\n`/unmute` - снять мут\n`/clear` - очистить сообщения\n`/warn` - выдать предупреждение\n`/warns` - показать предупреждения\n`/mod_logs` - показать историю действий",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🧪 Тестирование",
-        value="`/test_role_log` - проверить канал логов ролей",
-        inline=False
-    )
-    
-    embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
-    await interaction.response.send_message(embed=embed)
+    await channel.send(embed=embed)
+    await interaction.response.send_message(f"✅ Сообщение отправлено в {channel.mention}", ephemeral=True)
 
-# ==================== ПРЕФИКСНЫЕ КОМАНДЫ ====================
 
-@bot.command(name='синхронизировать')
-async def sync_command(ctx):
-    if ctx.author.id != MAIN_ADMIN_ID and not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ Только администраторы!")
+@bot.tree.command(name="template_save", description="Сохранить шаблон сообщения")
+@app_commands.describe(
+    name="Название шаблона",
+    title="Заголовок",
+    description="Описание",
+    color="Цвет",
+    footer="Нижний колонтитул"
+)
+@is_main_admin()
+async def save_template(
+    interaction: discord.Interaction,
+    name: str,
+    title: str,
+    description: str,
+    color: str = "blue",
+    footer: Optional[str] = None
+):
+    template = {
+        "title": title,
+        "description": description,
+        "color": color,
+        "footer": footer,
+        "created_by": interaction.user.id,
+        "created_at": datetime.datetime.utcnow().isoformat()
+    }
+    
+    data_manager.save_embed_template(interaction.guild_id, name, template)
+    await interaction.response.send_message(f"✅ Шаблон `{name}` сохранен!", ephemeral=True)
+
+
+@bot.tree.command(name="template_send", description="Отправить сообщение из шаблона")
+@app_commands.describe(
+    channel="Канал для отправки",
+    name="Название шаблона"
+)
+@is_main_admin()
+async def send_template(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    name: str
+):
+    template = data_manager.get_embed_template(interaction.guild_id, name)
+    
+    if not template:
+        await interaction.response.send_message(f"❌ Шаблон `{name}` не найден!", ephemeral=True)
         return
     
-    await bot.tree.sync()
-    await ctx.send("✅ Слэш-команды синхронизированы! by Ilya Vetrov")
-
-@bot.command(name='статус')
-async def status_command(ctx):
-    if ctx.author.id != MAIN_ADMIN_ID and not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ Только администраторы!")
-        return
+    color_map = {
+        "red": discord.Color.red(),
+        "green": discord.Color.green(),
+        "blue": discord.Color.blue(),
+        "gold": discord.Color.gold(),
+        "purple": discord.Color.purple(),
+        "orange": discord.Color.orange(),
+    }
+    embed_color = color_map.get(template.get("color", "blue"), discord.Color.blue())
     
     embed = discord.Embed(
-        title="🤖 СТАТУС БОТА",
-        color=discord.Color.blue(),
+        title=template["title"],
+        description=template["description"],
+        color=embed_color,
         timestamp=datetime.datetime.utcnow()
     )
     
-    embed.add_field(name="📱 Имя бота", value=f"```{bot.user.name}```", inline=True)
-    embed.add_field(name="🆔 ID", value=f"```{bot.user.id}```", inline=True)
-    embed.add_field(name="🌐 Серверов", value=f"```{len(bot.guilds)}```", inline=True)
+    if template.get("footer"):
+        embed.set_footer(text=template["footer"])
     
-    embed.add_field(name="⚙️ Автовыдача ролей", value=f"```{len(settings.join_roles)} серверов```", inline=True)
-    
-    total_channels = sum(len(v) for v in settings.log_channels.values())
-    embed.add_field(name="📋 Каналов логов", value=f"```{total_channels}```", inline=True)
-    
-    embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
-    
-    await ctx.send(embed=embed)
+    await channel.send(embed=embed)
+    await interaction.response.send_message(f"✅ Шаблон `{name}` отправлен в {channel.mention}", ephemeral=True)
 
-# ==================== ОБРАБОТЧИКИ СОБЫТИЙ ====================
+
+@bot.tree.command(name="template_list", description="Показать все сохраненные шаблоны")
+@is_main_admin()
+async def list_templates(interaction: discord.Interaction):
+    templates = data_manager.get_all_templates(interaction.guild_id)
+    
+    if not templates:
+        await interaction.response.send_message("❌ Нет сохраненных шаблонов!", ephemeral=True)
+        return
+    
+    embed = discord.Embed(title="📋 Сохраненные шаблоны", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
+    
+    for name, template in templates.items():
+        embed.add_field(name=f"📌 {name}", value=f"Заголовок: {template['title'][:50]}", inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="template_delete", description="Удалить шаблон")
+@app_commands.describe(name="Название шаблона")
+@is_main_admin()
+async def delete_template(interaction: discord.Interaction, name: str):
+    if data_manager.delete_embed_template(interaction.guild_id, name):
+        await interaction.response.send_message(f"✅ Шаблон `{name}` удален!", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"❌ Шаблон `{name}` не найден!", ephemeral=True)
+
+
+@bot.tree.command(name="help", description="Показать список команд")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(title="📚 Команды модерационного бота", description="**Автор: by Ilya Vetrov**", color=discord.Color.blue())
+    
+    embed.add_field(name="🎨 Красивые сообщения (только для главных админов)", 
+                    value="`/embed` - создать красивое сообщение\n`/embed_fields` - с полями\n`/say` - быстрое сообщение\n`/template_save` - сохранить шаблон\n`/template_send` - отправить из шаблона\n`/template_list` - список шаблонов\n`/template_delete` - удалить шаблон", 
+                    inline=False)
+    
+    embed.add_field(name="🛡️ Модерация",
+                    value="`/kick` - кикнуть\n`/ban` - забанить\n`/unban` - разбанить\n`/mute` - замутить\n`/unmute` - снять мут\n`/clear` - очистить чат\n`/warn` - выдать предупреждение\n`/warns` - список предупреждений\n`/mod_logs` - история действий",
+                    inline=False)
+    
+    embed.add_field(name="⚙️ Настройка логов",
+                    value="`/setup_all_logs` - быстрая настройка всех каналов\n`/set_mod_log_channel` - логи модерации\n`/set_message_delete_channel` - удаленные сообщения\n`/set_role_give_channel` - выдача ролей\n`/set_warns_channel` - предупреждения\n`/set_voice_channel` - голосовые каналы\n`/set_nickname_channel` - смена ников\n`/show_log_channels` - показать настройки",
+                    inline=False)
+    
+    embed.add_field(name="👋 Автовыдача ролей",
+                    value="`/set_join_role` - установить роль для новичков\n`/remove_join_role` - отключить автовыдачу",
+                    inline=False)
+    
+    embed.set_footer(text="by Ilya Vetrov • Все настройки сохраняются автоматически")
+    await interaction.response.send_message(embed=embed)
+
+# ==================== СОБЫТИЯ ====================
 
 @bot.event
 async def on_member_join(member):
-    """Приветствие при заходе нового участника (без выдачи роли)"""
-    
-    # Приветствие только для вашего конкретного сервера
     if member.guild.id == YOUR_GUILD_ID:
         channel = bot.get_channel(WELCOME_CHANNEL_ID)
         if channel:
@@ -932,301 +859,128 @@ async def on_member_join(member):
                 f"4. С балловой системе можно ознакомиться в этом канале <#{BALANCE_CHANNEL_ID}>"
             )
             
-            embed = discord.Embed(
-                title="👋 ДОБРО ПОЖАЛОВАТЬ!",
-                description=welcome_text,
-                color=discord.Color.green()
-            )
+            embed = discord.Embed(title="👋 ДОБРО ПОЖАЛОВАТЬ!", description=welcome_text, color=discord.Color.green())
             embed.set_footer(text="by Ilya Vetrov")
             await channel.send(f"{member.mention}", embed=embed)
             
-            # Отправляем ТО ЖЕ САМОЕ сообщение в личные сообщения
             try:
-                dm_embed = discord.Embed(
-                    title="👋 ДОБРО ПОЖАЛОВАТЬ НА СЕРВЕР!",
-                    description=welcome_text,
-                    color=discord.Color.green()
-                )
-                dm_embed.set_footer(text="by Ilya Vetrov")
-                await member.send(embed=dm_embed)
-                logger.info(f"📨 Отправлено ЛС пользователю {member.name} ({member.id})")
-            except discord.Forbidden:
-                logger.warning(f"❌ Не удалось отправить ЛС пользователю {member.name} - закрыты личные сообщения")
-            except Exception as e:
-                logger.error(f"❌ Ошибка при отправке ЛС: {e}")
-
-@bot.event
-async def on_message_delete(message):
-    """Логирование удаленных сообщений"""
-    if message.author.bot or not message.guild:
-        return
-    await log_message_delete(message.guild, message)
-
-@bot.event
-async def on_message_edit(before, after):
-    """Логирование измененных сообщений"""
-    if before.author.bot or before.content == after.content or not before.guild:
-        return
-    
-    guild_id = str(before.guild.id)
-    if guild_id in settings.log_channels.get("message_edit", {}):
-        channel_id = settings.log_channels["message_edit"][guild_id]
-        channel = before.guild.get_channel(int(channel_id))
-        if channel:
-            embed = discord.Embed(
-                title="✏ СООБЩЕНИЕ ИЗМЕНЕНО",
-                color=discord.Color.orange(),
-                timestamp=datetime.datetime.utcnow()
-            )
-            
-            author_text = f"{before.author.mention}\nID: `{before.author.id}`\nИмя: `{before.author.name}`"
-            embed.add_field(name="👤 Автор", value=author_text, inline=True)
-            
-            channel_text = f"{before.channel.mention}\nID: `{before.channel.id}`"
-            embed.add_field(name="📌 Канал", value=channel_text, inline=True)
-            
-            message_link = f"https://discord.com/channels/{before.guild.id}/{before.channel.id}/{before.id}"
-            embed.add_field(name="🔗 Ссылка", value=f"[Перейти]({message_link})", inline=True)
-            
-            old_content = before.content[:500] + "..." if len(before.content) > 500 else before.content
-            embed.add_field(name="📤 Было", value=f"```{old_content or '[Пусто]'}```", inline=False)
-            
-            new_content = after.content[:500] + "..." if len(after.content) > 500 else after.content
-            embed.add_field(name="📥 Стало", value=f"```{new_content or '[Пусто]'}```", inline=False)
-            
-            embed.set_footer(text=f"by Ilya Vetrov • ID сообщения: {before.id}")
-            await channel.send(embed=embed)
-
-@bot.event
-async def on_bulk_message_delete(messages):
-    """Логирование массового удаления сообщений - ПОКАЗЫВАЕМ КАЖДОЕ СООБЩЕНИЕ ОТДЕЛЬНО"""
-    if not messages:
-        return
-    
-    guild = messages[0].guild
-    if not guild:
-        return
-    
-    guild_id = str(guild.id)
-    
-    # Используем канал для массовых удалений, если настроен, иначе message_delete
-    log_channel_id = None
-    if guild_id in settings.log_channels.get("bulk_delete", {}):
-        log_channel_id = settings.log_channels["bulk_delete"][guild_id]
-    elif guild_id in settings.log_channels.get("message_delete", {}):
-        log_channel_id = settings.log_channels["message_delete"][guild_id]
-    
-    if log_channel_id:
-        log_channel = guild.get_channel(int(log_channel_id))
-        if log_channel:
-            # Информационное сообщение о массовом удалении
-            info_embed = discord.Embed(
-                title="📦 МАССОВОЕ УДАЛЕНИЕ СООБЩЕНИЙ",
-                description=f"**Канал:** {messages[0].channel.mention}\n**Количество:** {len(messages)} сообщений",
-                color=discord.Color.red(),
-                timestamp=datetime.datetime.utcnow()
-            )
-            info_embed.set_footer(text="by Ilya Vetrov")
-            await log_channel.send(embed=info_embed)
-            
-            # Отправляем каждое удаленное сообщение отдельно (не больше 15, чтобы не спамить)
-            sent_count = 0
-            for i, message in enumerate(messages):
-                # Пропускаем сообщения ботов
-                if message.author.bot:
-                    continue
-                    
-                if sent_count >= 15:  # Ограничиваем до 15 сообщений, чтобы не заспамить
-                    remaining = len(messages) - sent_count
-                    await log_channel.send(f"*... и ещё {remaining} сообщений (показаны первые 15)*")
-                    break
-                
-                embed = discord.Embed(
-                    title=f"🗑 УДАЛЕННОЕ СООБЩЕНИЕ #{i+1}",
-                    color=discord.Color.red(),
-                    timestamp=datetime.datetime.utcnow()
-                )
-                
-                # Автор
-                author_name = message.author.name
-                if message.author.nick:
-                    author_name = f"{message.author.nick} ({message.author.name})"
-                
-                author_text = f"{message.author.mention}\n**Имя:** `{author_name}`\n**ID:** `{message.author.id}`"
-                embed.add_field(name="👤 Автор", value=author_text, inline=True)
-                
-                # Канал
-                embed.add_field(name="📌 Канал", value=f"{message.channel.mention}\nID: `{message.channel.id}`", inline=True)
-                
-                # Время отправки
-                if message.created_at:
-                    time_text = message.created_at.strftime("%d.%m.%Y %H:%M:%S")
-                    embed.add_field(name="⏰ Отправлено", value=f"`{time_text}`", inline=True)
-                
-                # Содержание
-                if message.content:
-                    content = message.content[:800] + "..." if len(message.content) > 800 else message.content
-                    embed.add_field(name="📝 Содержание", value=f"```{content}```", inline=False)
-                else:
-                    embed.add_field(name="📝 Содержание", value="`[Пустое сообщение]`", inline=False)
-                
-                # Вложения
-                if message.attachments:
-                    attachments_list = []
-                    for att in message.attachments:
-                        attachments_list.append(f"[{att.filename}]({att.url})")
-                    attachments_text = "\n".join(attachments_list)
-                    embed.add_field(name="📎 Вложения", value=attachments_text[:500], inline=False)
-                
-                # Упоминания
-                if message.mentions:
-                    mentions_list = [f"{m.mention}" for m in message.mentions[:3]]
-                    mentions_text = ", ".join(mentions_list)
-                    if len(message.mentions) > 3:
-                        mentions_text += f" и ещё {len(message.mentions)-3}"
-                    embed.add_field(name="👥 Упоминания", value=mentions_text, inline=False)
-                
-                embed.set_footer(text=f"by Ilya Vetrov • ID сообщения: {message.id}")
-                await log_channel.send(embed=embed)
-                sent_count += 1
-                
-                # Небольшая задержка, чтобы избежать rate limit
-                await asyncio.sleep(0.5)
-            
-            # Если не отправили ни одного сообщения (все были от ботов)
-            if sent_count == 0 and len(messages) > 0:
-                await log_channel.send(f"*Все {len(messages)} удаленных сообщений были от ботов*")
+                await member.send(embed=embed)
+                logger.info(f"📨 Отправлено ЛС пользователю {member.name}")
+            except:
+                logger.warning(f"❌ Не удалось отправить ЛС {member.name}")
 
 @bot.event
 async def on_member_update(before, after):
-    """Логирование изменений профиля пользователя (роли и никнеймы)"""
     if before.bot or not before.guild:
         return
     
-    guild_id = str(before.guild.id)
-    
     # Логирование смены никнейма
-    if guild_id in settings.log_channels.get("nickname", {}):
-        if before.nick != after.nick:
-            old_nick = before.nick or before.name
-            new_nick = after.nick or after.name
-            
-            description = f"📝 {before.mention} (`{before.id}`) **сменил никнейм**\n**Было:** `{old_nick}`\n**Стало:** `{new_nick}`"
-            await log_nickname(before.guild, description)
+    if before.nick != after.nick:
+        channel_id = data_manager.get_log_channel(before.guild.id, "nickname")
+        if channel_id:
+            channel = before.guild.get_channel(channel_id)
+            if channel:
+                old_nick = before.nick or before.name
+                new_nick = after.nick or after.name
+                embed = discord.Embed(description=f"📝 {before.mention} сменил ник\nБыло: `{old_nick}`\nСтало: `{new_nick}`", color=discord.Color.teal(), timestamp=datetime.datetime.utcnow())
+                embed.set_footer(text="by Ilya Vetrov")
+                await channel.send(embed=embed)
     
     # Логирование изменений ролей
-    if guild_id in settings.log_channels.get("role_give", {}):
-        before_roles = set(before.roles)
-        after_roles = set(after.roles)
-        
-        # Выданные роли
-        added_roles = after_roles - before_roles
-        for role in added_roles:
-            if role.name != "@everyone":
-                # Получаем информацию о том, кто выдал роль из аудит-лога
-                moderator_info = await get_role_moderator(before.guild, before, role, "add")
-                description = f"{moderator_info}\n**Пользователь:** {before.mention} (`{before.id}`)\n**Получил роль:** {role.mention}\n**ID роли:** `{role.id}`"
-                await log_role_give(before.guild, description, discord.Color.green())
-                logger.info(f"Лог роли (выдача): {description}")
-        
-        # Снятые роли
-        removed_roles = before_roles - after_roles
-        for role in removed_roles:
-            if role.name != "@everyone":
-                # Получаем информацию о том, кто снял роль из аудит-лога
-                moderator_info = await get_role_moderator(before.guild, before, role, "remove")
-                description = f"{moderator_info}\n**Пользователь:** {before.mention} (`{before.id}`)\n**Лишился роли:** {role.mention}\n**ID роли:** `{role.id}`"
-                await log_role_give(before.guild, description, discord.Color.red())
-                logger.info(f"Лог роли (снятие): {description}")
+    before_roles = set(before.roles)
+    after_roles = set(after.roles)
+    
+    added_roles = after_roles - before_roles
+    for role in added_roles:
+        if role.name != "@everyone":
+            embed = discord.Embed(description=f"➕ {before.mention} получил роль {role.mention}", color=discord.Color.green(), timestamp=datetime.datetime.utcnow())
+            embed.set_footer(text="by Ilya Vetrov")
+            await send_to_log_channel(before.guild, "role_give", embed)
+    
+    removed_roles = before_roles - after_roles
+    for role in removed_roles:
+        if role.name != "@everyone":
+            embed = discord.Embed(description=f"➖ {before.mention} лишился роли {role.mention}", color=discord.Color.red(), timestamp=datetime.datetime.utcnow())
+            embed.set_footer(text="by Ilya Vetrov")
+            await send_to_log_channel(before.guild, "role_give", embed)
+
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot or not message.guild:
+        return
+    await log_message_delete(message.guild, message)
 
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot or not member.guild:
         return
     
-    guild_id = str(member.guild.id)
-    if guild_id not in settings.log_channels.get("voice", {}):
+    channel_id = data_manager.get_log_channel(member.guild.id, "voice")
+    if not channel_id:
+        return
+    
+    channel = member.guild.get_channel(channel_id)
+    if not channel:
         return
     
     if before.channel is None and after.channel is not None:
-        description = f"🔊 {member.mention} (`{member.id}`) **зашел** в голосовой канал {after.channel.mention}"
-        await log_voice(member.guild, description, discord.Color.green())
-    
+        embed = discord.Embed(description=f"🔊 {member.mention} зашел в {after.channel.mention}", color=discord.Color.green(), timestamp=datetime.datetime.utcnow())
+        await channel.send(embed=embed)
     elif before.channel is not None and after.channel is None:
-        description = f"🔇 {member.mention} (`{member.id}`) **вышел** из голосового канала {before.channel.mention}"
-        await log_voice(member.guild, description, discord.Color.red())
-    
+        embed = discord.Embed(description=f"🔇 {member.mention} вышел из {before.channel.mention}", color=discord.Color.red(), timestamp=datetime.datetime.utcnow())
+        await channel.send(embed=embed)
     elif before.channel != after.channel:
-        description = f"🔄 {member.mention} (`{member.id}`) **переместился** из {before.channel.mention} в {after.channel.mention}"
-        await log_voice(member.guild, description, discord.Color.blue())
+        embed = discord.Embed(description=f"🔄 {member.mention} переместился из {before.channel.mention} в {after.channel.mention}", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
+        await channel.send(embed=embed)
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.NotOwner):
+        await ctx.send("❌ Только администраторы могут использовать эту команду!")
 
-async def save_mod_log(guild, action, moderator, target, reason, duration=None):
-    guild_id = str(guild.id)
-    
-    if guild_id not in settings.mod_logs:
-        settings.mod_logs[guild_id] = []
-    
-    log_entry = {
-        "action": action,
-        "moderator": moderator.id,
-        "target": target.id,
-        "reason": reason,
-        "date": datetime.datetime.utcnow().isoformat()
-    }
-    
-    if duration:
-        log_entry["duration"] = duration
-    
-    settings.mod_logs[guild_id].append(log_entry)
-    
-    if len(settings.mod_logs[guild_id]) > 1000:
-        settings.mod_logs[guild_id] = settings.mod_logs[guild_id][-1000:]
-    
-    settings.save_mod_logs()
+# ==================== ПРЕФИКСНЫЕ КОМАНДЫ ====================
 
-# ==================== ОБРАБОТКА ОШИБОК ====================
-
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error):
-    if isinstance(error, app_commands.errors.MissingPermissions):
-        embed = discord.Embed(
-            title="❌ Ошибка доступа",
-            description="У вас нет прав администратора для использования этой команды!",
-            color=discord.Color.red()
-        )
-        embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    elif isinstance(error, app_commands.errors.CheckFailure):
-        embed = discord.Embed(
-            title="❌ Ошибка доступа",
-            description="Только администраторы могут использовать эту команду!",
-            color=discord.Color.red()
-        )
-        embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+@bot.command(name='синхронизировать')
+async def sync_command(ctx):
+    if ctx.author.id in MAIN_ADMIN_IDS or ctx.author.guild_permissions.administrator:
+        await bot.tree.sync()
+        await ctx.send("✅ Слэш-команды синхронизированы!")
     else:
-        embed = discord.Embed(
-            title="❌ Произошла ошибка",
-            description=str(error),
-            color=discord.Color.red()
-        )
-        embed.set_footer(text="by Ilya Vetrov • Модерационный бот")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        logger.error(f"Ошибка команды: {error}")
+        await ctx.send("❌ Только администраторы!")
 
-# ==================== ЗАПУСК БОТА ====================
+@bot.command(name='статус')
+async def status_command(ctx):
+    if ctx.author.id in MAIN_ADMIN_IDS or ctx.author.guild_permissions.administrator:
+        embed = discord.Embed(title="🤖 СТАТУС БОТА", color=discord.Color.blue(), timestamp=datetime.datetime.utcnow())
+        embed.add_field(name="📱 Имя бота", value=f"```{bot.user.name}```", inline=True)
+        embed.add_field(name="🆔 ID", value=f"```{bot.user.id}```", inline=True)
+        embed.add_field(name="🌐 Серверов", value=f"```{len(bot.guilds)}```", inline=True)
+        embed.add_field(name="⚙️ Автовыдача ролей", value=f"```{len(data_manager.settings['join_roles'])} серверов```", inline=True)
+        
+        total_channels = sum(len(channels) for channels in data_manager.settings["log_channels"].values())
+        embed.add_field(name="📋 Каналов логов", value=f"```{total_channels}```", inline=True)
+        
+        total_warns = sum(len(warns) for warns in data_manager.settings["warns"].values())
+        embed.add_field(name="⚠️ Предупреждений", value=f"```{total_warns}```", inline=True)
+        
+        uptime = datetime.datetime.utcnow() - bot.start_time
+        days = uptime.days
+        hours = uptime.seconds // 3600
+        minutes = (uptime.seconds % 3600) // 60
+        embed.add_field(name="⏱️ Время работы", value=f"```{days}д {hours}ч {minutes}м```", inline=True)
+        
+        embed.set_footer(text="by Ilya Vetrov")
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send("❌ Только администраторы!")
+
+# ==================== ЗАПУСК ====================
 
 if __name__ == "__main__":
-    print("🔄 Загрузка данных...")
-    settings.load_all()
-    
     token = os.getenv('TOKEN')
     
     if not token:
         print("❌ ОШИБКА: Токен не найден в переменных окружения!")
-        print("📝 Убедитесь что в BotHost добавлена переменная TOKEN с вашим токеном")
         exit(1)
     
     print("🔄 Запуск бота...")
